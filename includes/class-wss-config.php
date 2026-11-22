@@ -25,10 +25,33 @@ final class WSS_Config {
 	public const TAGS_SCAN          = 100;
 	public const TAGS_OUT           = 30;
 
+	/** Words shorter than this are not truncated to a stem — too broad otherwise. */
+	public const STEM_MIN_LEN = 4;
+
+	/** Max IDs in exclude/exclude_id — keeps the NOT IN (...) list bounded. */
+	public const MAX_EXCLUDE = 200;
+
+	public const MATCH_MODES = [ 'auto', 'fuzzy', 'exact' ];
+
+	/* ============================================================
+	 *  Links: response fields and batch mode
+	 * ============================================================ */
+
+	public const LINK_FIELDS = [
+		'post_id', 'title', 'permalink', 'status', 'url', 'host',
+		'domain', 'anchor', 'context', 'match_type',
+	];
+
+	/** Always returned, even when `fields` does not list them. */
+	public const LINK_FIELDS_REQUIRED = [ 'post_id', 'match_type' ];
+
+	/** Max lookups per batch call. */
+	public const BATCH_MAX = 50;
+
 	public const TAGS_CACHE_TTL   = 86400;
-	public const TAGS_CACHE_VER   = 'v2';
+	public const TAGS_CACHE_VER   = 'v3'; // v3: morphology (word stems)
 	public const POSTS_CACHE_TTL  = 86400;
-	public const POSTS_CACHE_VER  = 'v10'; // v10: post_type param, links scope
+	public const POSTS_CACHE_VER  = 'v12'; // v12: visibility mode in the key
 	public const CACHE_GEN_OPTION = 'wss_cache_gen';
 
 	public const RATE_LIMIT_MAX = 120;
@@ -36,6 +59,32 @@ final class WSS_Config {
 
 	public const PURGE_STATUSES   = [ 'publish', 'future' ];
 	public const ALLOWED_STATUSES = [ 'publish', 'draft', 'pending', 'private', 'future' ];
+
+	/**
+	 * Statuses every user with the search capability may see, regardless of
+	 * the author: duplicate checks run before publishing, so unpublished
+	 * drafts and scheduled posts of colleagues must be searchable.
+	 */
+	public const SHARED_STATUSES = [ 'publish', 'future', 'draft', 'pending' ];
+
+	/**
+	 * Visibility model for posts of other authors.
+	 *
+	 * - shared (default): SHARED_STATUSES are visible to every user with
+	 *   WSS_Config::CAPABILITY; private posts stay with their author and
+	 *   with editors.
+	 * - own: published posts plus the user's own posts only (the strict
+	 *   model, useful when the search API is opened to a wider audience).
+	 *
+	 * Override with define( 'WSS_VISIBILITY_MODE', 'own' ) in wp-config.php
+	 * or with the wss_visibility_mode filter.
+	 */
+	public static function visibility_mode(): string {
+		$mode = defined( 'WSS_VISIBILITY_MODE' ) ? (string) WSS_VISIBILITY_MODE : 'shared';
+		$mode = (string) apply_filters( 'wss_visibility_mode', $mode );
+
+		return in_array( $mode, [ 'shared', 'own' ], true ) ? $mode : 'shared';
+	}
 
 	public const TOKEN_CHARS = '[\p{L}\p{N}._+\-@:\/?#=&%~\'!*]';
 
@@ -55,9 +104,9 @@ final class WSS_Config {
 	public const LINKS_TABLE_VER_OPTION = 'wss_links_table_ver';
 	public const LINKS_TABLE_VER        = 'v1';
 
-	public const LINK_CONTEXT_CHARS = 100;   // символов слева/справа от тега
-	public const LINK_ANCHOR_MAX    = 500;   // обрезка anchor
-	public const LINK_CONTEXT_MAX   = 400;   // обрезка context
+	public const LINK_CONTEXT_CHARS = 100;   // chars left/right of the tag
+	public const LINK_ANCHOR_MAX    = 500;   // anchor truncation
+	public const LINK_CONTEXT_MAX   = 400;   // context truncation
 
 	/* ============================================================
 	 *  Scope (search)
@@ -68,6 +117,16 @@ final class WSS_Config {
 	public const SCOPE_ALL   = 'all';
 
 	public const SCOPES = [ self::SCOPE_POSTS, self::SCOPE_LINKS, self::SCOPE_ALL ];
+
+	/* ============================================================
+	 *  GitHub updates
+	 * ============================================================ */
+
+	public const UPDATER_REPO      = 'Gnoztis/WP-Smart-Search';
+	public const UPDATER_SLUG      = 'wp-smart-search';
+	public const UPDATER_BASENAME  = 'wp-smart-search/wp-smart-search.php';
+	public const UPDATER_CACHE_TTL = 21600;  // 6 hours — successful check.
+	public const UPDATER_ERROR_TTL = 900;    // 15 minutes — failed check.
 
 	public static function user_can_search(): bool {
 		return is_user_logged_in() && current_user_can( self::CAPABILITY );

@@ -113,7 +113,7 @@ final class WSS_Admin_Page {
 		if ( ! is_file( $real ) || ! is_readable( $real ) || filesize( $real ) <= 0 ) {
 			return null;
 		}
-		$content = file_get_contents( $real );
+		$content = file_get_contents( $real ); // phpcs:ignore -- realpath() and the plugin dir prefix were checked above.
 		return ( is_string( $content ) && $content !== '' ) ? $content : null;
 	}
 

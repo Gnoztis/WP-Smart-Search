@@ -14,6 +14,7 @@ final class WSS_Plugin {
 	private WSS_Ajax_Handler    $ajax;
 	private WSS_Rest_Controller $rest;
 	private WSS_Admin_Page      $admin;
+	private WSS_GitHub_Updater  $updater;
 
 	public static function instance(): self {
 		if ( self::$instance === null ) {
@@ -30,6 +31,7 @@ final class WSS_Plugin {
 		$this->ajax          = new WSS_Ajax_Handler( $this->engine, $this->rate_limiter );
 		$this->rest          = new WSS_Rest_Controller( $this->engine, $this->rate_limiter );
 		$this->admin         = new WSS_Admin_Page();
+		$this->updater       = new WSS_GitHub_Updater();
 	}
 
 	public function init(): void {
@@ -38,5 +40,6 @@ final class WSS_Plugin {
 		$this->ajax->register_hooks();
 		$this->rest->register_hooks();
 		$this->admin->register_hooks();
+		$this->updater->register_hooks();
 	}
 }

@@ -17,7 +17,7 @@ final class WSS_Links_Indexer {
 	}
 
 	/* ============================================================
-	 *  Установка / обновление таблицы
+	 *  Table install / upgrade
 	 * ============================================================ */
 
 	public static function install_table(): void {
@@ -91,7 +91,7 @@ final class WSS_Links_Indexer {
 			return;
 		}
 		if ( in_array( $new_status, [ 'auto-draft', 'inherit', 'trash' ], true ) ) {
-			// На удаление/мусор реагируем отдельным hook-ом (deleted_post).
+			// Deletion/trash is handled by a separate hook (deleted_post).
 			return;
 		}
 		$this->indexed[ $post_id ] = true;
@@ -177,7 +177,7 @@ final class WSS_Links_Indexer {
 	}
 
 	/* ============================================================
-	 *  Парсинг <a href> из HTML
+	 *  Parsing <a href> from HTML
 	 * ============================================================ */
 
 	/**
@@ -207,7 +207,7 @@ final class WSS_Links_Indexer {
 				continue;
 			}
 			if ( ! preg_match( '#^[a-z][a-z0-9+.-]*://#i', $href ) ) {
-				continue; // только абсолютные
+				continue; // absolute URLs only
 			}
 
 			$anchor_html = (string) ( $matches[3][ $i ][0] ?? '' );
@@ -248,7 +248,7 @@ final class WSS_Links_Indexer {
 	}
 
 	/* ============================================================
-	 *  Registrable domain (eTLD+1 эвристика)
+	 *  Registrable domain (eTLD+1 heuristic)
 	 * ============================================================ */
 
 	public static function registrable_domain( string $host ): string {
@@ -268,7 +268,7 @@ final class WSS_Links_Indexer {
 			return $host;
 		}
 
-		// Известные second-level TLD (не полный PSL, но покрывает частые случаи).
+		// Known second-level TLDs (not a full PSL, but covers common cases).
 		$known_sld = [ 'co', 'com', 'org', 'net', 'gov', 'edu', 'ac', 'sch' ];
 		$last = $parts[ $n - 1 ];
 		$prev = $parts[ $n - 2 ];

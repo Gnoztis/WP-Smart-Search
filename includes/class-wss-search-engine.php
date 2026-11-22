@@ -12,7 +12,7 @@ final class WSS_Search_Engine {
 	}
 
 	/* ============================================================
-	 *  Точка входа
+	 *  Entry point
 	 * ============================================================ */
 
 	public function do_search( array $input, bool $is_api ) {
@@ -29,7 +29,7 @@ final class WSS_Search_Engine {
 		}
 
 		$match = isset( $input['match'] ) ? sanitize_key( (string) $input['match'] ) : 'auto';
-		if ( ! in_array( $match, [ 'auto', 'fuzzy', 'exact' ], true ) ) {
+		if ( ! in_array( $match, WSS_Config::MATCH_MODES, true ) ) {
 			$match = 'auto';
 		}
 
@@ -41,23 +41,42 @@ final class WSS_Search_Engine {
 		$page = isset( $input['page'] ) ? absint( $input['page'] ) : 1;
 		$page = max( 1, $page );
 
-		$words = $this->parse_query( $raw );
-		if ( is_wp_error( $words ) ) {
-			return $words;
+		$parsed = $this->parse_query( $raw );
+		if ( is_wp_error( $parsed ) ) {
+			return $parsed;
 		}
 
-		$filters          = $this->parse_filters( $input, $is_api );
+		$words = $parsed['words'];
+
+		// The stem, not the whole word: "sandboxes" and "sandbox" must
+		// find each other.
+		$terms = WSS_Morphology::terms( $words );
+		if ( empty( $terms ) ) {
+			return new WP_Error( 'invalid', __( 'Не удалось разобрать запрос.', 'wp-smart-search' ) );
+		}
+
+		$filters = $this->parse_filters( $input, $is_api );
+		if ( is_wp_error( $filters ) ) {
+			return $filters;
+		}
 		$filters['query'] = $raw;
 
 		$per_page = isset( $input['per_page'] ) ? absint( $input['per_page'] ) : WSS_Config::POSTS_PER_PAGE;
 		$per_page = max( 1, min( WSS_Config::POSTS_PER_PAGE_MAX, $per_page ) );
 
-		$patterns = $this->build_word_patterns( $words );
+		$patterns = $this->build_word_patterns( $terms );
 
 		$payload = [
 			'query'  => $raw,
 			'refang' => $refang,
 			'scope'  => $scope,
+			'meta'   => [
+				'plugin_version' => WSS_VERSION,
+				'terms'          => array_values( $terms ),
+				'tokens'         => $parsed['tokens'],
+				'dropped_tokens' => $parsed['dropped'],
+				'max_words'      => WSS_Config::MAX_WORDS,
+			],
 		];
 
 		if ( $scope !== WSS_Config::SCOPE_LINKS ) {
@@ -65,11 +84,11 @@ final class WSS_Search_Engine {
 			$payload['match'] = $match;
 
 			if ( $type === 'all' || $type === 'tags' ) {
-				$payload['tags'] = $this->search_tags( $words );
+				$payload['tags'] = $this->search_tags( $terms );
 			}
 			if ( $type === 'all' || $type === 'posts' ) {
 				$payload['posts'] = $this->search_posts(
-					$words,
+					$terms,
 					$patterns,
 					$page,
 					$per_page,
@@ -81,14 +100,73 @@ final class WSS_Search_Engine {
 		}
 
 		if ( $scope === WSS_Config::SCOPE_LINKS || $scope === WSS_Config::SCOPE_ALL ) {
-			$payload['links'] = $this->search_links( $words, $input, $filters, $is_api );
+			$links = $this->search_links( $terms, $input, $filters, $is_api );
+			if ( is_wp_error( $links ) ) {
+				return $links;
+			}
+			$payload['links'] = $links;
 		}
 
 		return $payload;
 	}
 
+	/**
+	 * Batch link search: several domains/hosts/URLs/anchors in one
+	 * HTTP request. Keeps a 47-domain audit from turning into 47
+	 * requests and hitting PHP-FPM limits (503).
+	 *
+	 * @param array<int,array<string,string>> $lookups Each element is one
+	 *        of ['domain'=>…], ['host'=>…], ['url'=>…], ['anchor'=>…].
+	 * @return array|WP_Error
+	 */
+	public function do_links_batch( array $lookups, array $base_input, bool $is_api ) {
+		$filters = $this->parse_filters( $base_input, $is_api );
+		if ( is_wp_error( $filters ) ) {
+			return $filters;
+		}
+		$filters['query'] = '';
+
+		$per_page = isset( $base_input['per_page'] ) ? absint( $base_input['per_page'] ) : 5;
+		$per_page = max( 1, min( WSS_Config::POSTS_PER_PAGE_MAX, $per_page ) );
+
+		$clean = $base_input;
+		foreach ( [ 'url', 'domain', 'host', 'anchor' ] as $key ) {
+			unset( $clean[ $key ] );
+		}
+
+		$results = [];
+		foreach ( $lookups as $lookup ) {
+			$input = array_merge(
+				$clean,
+				$lookup,
+				[
+					'page'        => 1,
+					'per_page'    => $per_page,
+					'exact_total' => false,
+				]
+			);
+
+			$result = $this->search_links( [], $input, $filters, $is_api );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+
+			$result['lookup'] = $lookup;
+			$results[]        = $result;
+		}
+
+		return [
+			'results' => $results,
+			'meta'    => [
+				'count'       => count( $results ),
+				'per_page'    => $per_page,
+				'total_exact' => false,
+			],
+		];
+	}
+
 	/* ============================================================
-	 *  Утилиты
+	 *  Utilities
 	 * ============================================================ */
 
 	private function to_bool( $value, bool $default = false ): bool {
@@ -107,12 +185,53 @@ final class WSS_Search_Engine {
 		return (bool) $value;
 	}
 
-	private function parse_filters( array $input, bool $is_api ): array {
+	private function parse_filters( array $input, bool $is_api ) {
 		$statuses_raw = $input['statuses'] ?? [];
 		if ( is_string( $statuses_raw ) ) {
 			$statuses_raw = array_map( 'trim', explode( ',', $statuses_raw ) );
 		}
-		$statuses = array_values( array_intersect( (array) $statuses_raw, WSS_Config::ALLOWED_STATUSES ) );
+		if ( ! is_array( $statuses_raw ) ) {
+			return new WP_Error(
+				'wss_invalid_statuses',
+				__( 'Параметр statuses должен быть массивом или списком через запятую.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
+
+		$statuses = [];
+		$invalid  = [];
+		foreach ( $statuses_raw as $status ) {
+			if ( ! is_string( $status ) && ! is_int( $status ) ) {
+				$invalid[] = '?';
+				continue;
+			}
+			$status = sanitize_key( (string) $status );
+			if ( $status === '' ) {
+				continue;
+			}
+			if ( in_array( $status, WSS_Config::ALLOWED_STATUSES, true ) ) {
+				$statuses[] = $status;
+			} else {
+				$invalid[] = $status;
+			}
+		}
+		$statuses = array_values( array_unique( $statuses ) );
+
+		// In the API an unknown status is a client error, not a silent
+		// fallback to all statuses. In the admin (AJAX) we ignore junk.
+		if ( ! empty( $invalid ) && $is_api ) {
+			return new WP_Error(
+				'wss_invalid_statuses',
+				sprintf(
+					/* translators: 1: given statuses, 2: allowed statuses */
+					__( 'Недопустимые статусы: %1$s. Разрешены: %2$s.', 'wp-smart-search' ),
+					implode( ', ', array_unique( $invalid ) ),
+					implode( ', ', WSS_Config::ALLOWED_STATUSES )
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
 		if ( empty( $statuses ) ) {
 			$statuses = WSS_Config::ALLOWED_STATUSES;
 		}
@@ -122,10 +241,9 @@ final class WSS_Search_Engine {
 			$date_range = 'any';
 		}
 
+		// The author filter only narrows the result set; visibility is
+		// enforced by status_scope(), so it is safe for every user.
 		$author = isset( $input['author'] ) ? absint( $input['author'] ) : 0;
-		if ( ! $is_api && ! current_user_can( 'edit_others_posts' ) ) {
-			$author = 0;
-		}
 
 		$orderby = isset( $input['orderby'] ) ? sanitize_key( (string) $input['orderby'] ) : 'date_desc';
 		if ( ! in_array( $orderby, [ 'date_desc', 'date_asc' ], true ) ) {
@@ -136,15 +254,35 @@ final class WSS_Search_Engine {
 		if ( $post_type === '' ) {
 			$post_type = 'post';
 		}
+		if ( $is_api && ! post_type_exists( $post_type ) ) {
+			return new WP_Error(
+				'wss_invalid_post_type',
+				sprintf(
+					/* translators: %s: post type name */
+					__( 'Неизвестный тип записи: %s.', 'wp-smart-search' ),
+					$post_type
+				),
+				[ 'status' => 400 ]
+			);
+		}
 
 		$exclude = [];
-		if ( isset( $input['exclude'] ) ) {
-			$exclude = array_merge( $exclude, (array) $input['exclude'] );
+		foreach ( [ 'exclude', 'exclude_id' ] as $key ) {
+			if ( ! isset( $input[ $key ] ) ) {
+				continue;
+			}
+			$ids = is_array( $input[ $key ] ) ? $input[ $key ] : [ $input[ $key ] ];
+			foreach ( $ids as $id ) {
+				$id = absint( $id );
+				if ( $id > 0 ) {
+					$exclude[] = $id;
+				}
+			}
 		}
-		if ( isset( $input['exclude_id'] ) ) {
-			$exclude = array_merge( $exclude, (array) $input['exclude_id'] );
+		$exclude = array_values( array_unique( $exclude ) );
+		if ( count( $exclude ) > WSS_Config::MAX_EXCLUDE ) {
+			$exclude = array_slice( $exclude, 0, WSS_Config::MAX_EXCLUDE );
 		}
-		$exclude = array_values( array_filter( array_map( 'absint', $exclude ) ) );
 
 		return [
 			'statuses'   => $statuses,
@@ -159,7 +297,7 @@ final class WSS_Search_Engine {
 	}
 
 	/* ============================================================
-	 *  Парсинг запроса
+	 *  Query parsing
 	 * ============================================================ */
 
 	private function parse_query( string $raw ) {
@@ -181,7 +319,13 @@ final class WSS_Search_Engine {
 		if ( ! is_array( $parts ) || empty( $parts ) ) {
 			return new WP_Error( 'empty', __( 'Некорректный запрос.', 'wp-smart-search' ) );
 		}
-		$parts = array_slice( $parts, 0, WSS_Config::MAX_WORDS );
+
+		// How many words the user sent and how many were dropped by
+		// the limit — the client must know the query was truncated instead
+		// of silently getting narrower results.
+		$tokens  = count( $parts );
+		$parts   = array_slice( $parts, 0, WSS_Config::MAX_WORDS );
+		$dropped = max( 0, $tokens - count( $parts ) );
 
 		$token_re = '/^' . WSS_Config::TOKEN_CHARS . '+$/u';
 		$words    = [];
@@ -197,19 +341,89 @@ final class WSS_Search_Engine {
 				__( 'Не удалось разобрать запрос. Используйте буквы, цифры и символы . - + _ * @ : / ? # & = % ~ \' !', 'wp-smart-search' )
 			);
 		}
-		return $words;
+
+		return [
+			'words'   => $words,
+			'tokens'  => $tokens,
+			'dropped' => $dropped,
+		];
 	}
 
 	/* ============================================================
-	 *  Сопоставление
+	 *  Matching
 	 * ============================================================ */
 
-	private function build_word_patterns( array $words ): array {
+	private function build_word_patterns( array $terms ): array {
 		$patterns = [];
-		foreach ( $words as $w ) {
-			$patterns[] = '/(?<![\p{L}\p{N}_])' . preg_quote( $w, '/' ) . '(?![\p{L}\p{N}_])/iu';
+		foreach ( $terms as $term ) {
+			$patterns[] = WSS_Morphology::pattern( (string) $term );
 		}
 		return $patterns;
+	}
+
+	/**
+	 * Status restriction based on the current user's capabilities and on the
+	 * configured visibility model (WSS_Config::visibility_mode()).
+	 *
+	 * shared (default): every user with the search capability sees posts in
+	 * WSS_Config::SHARED_STATUSES by any author — draft and future posts
+	 * included — because duplicates are checked before publishing. Private
+	 * posts remain visible to their author and to editors only.
+	 *
+	 * own: published posts plus the user's own posts in other statuses.
+	 *
+	 * @return array{sql:string,params:array<int,mixed>}
+	 */
+	private function status_scope( array $filters ): array {
+		$statuses = $filters['statuses'];
+		$uid      = (int) get_current_user_id();
+
+		if ( $uid > 0 && current_user_can( 'edit_others_posts' ) ) {
+			$ph = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
+			return [
+				'sql'    => "p.post_status IN ($ph)",
+				'params' => array_values( $statuses ),
+			];
+		}
+
+		if ( $uid <= 0 ) {
+			$statuses = array_values( array_intersect( $statuses, [ 'publish' ] ) );
+		}
+
+		// Published posts are public in every mode; the rest of the shared
+		// statuses only in the shared model.
+		$shared = array_values( array_intersect( $statuses, [ 'publish' ] ) );
+		if ( 'shared' === WSS_Config::visibility_mode() ) {
+			$shared = array_values( array_intersect( $statuses, WSS_Config::SHARED_STATUSES ) );
+		}
+
+		$own    = array_values( array_diff( $statuses, $shared ) );
+		$parts  = [];
+		$params = [];
+
+		if ( ! empty( $shared ) ) {
+			$ph      = implode( ',', array_fill( 0, count( $shared ), '%s' ) );
+			$parts[] = "p.post_status IN ($ph)";
+			foreach ( $shared as $status ) {
+				$params[] = $status;
+			}
+		}
+		if ( $uid > 0 && ! empty( $own ) ) {
+			$ph       = implode( ',', array_fill( 0, count( $own ), '%s' ) );
+			$parts[]  = "(p.post_author = %d AND p.post_status IN ($ph))";
+			$params[] = $uid;
+			foreach ( $own as $status ) {
+				$params[] = $status;
+			}
+		}
+		if ( empty( $parts ) ) {
+			$parts[] = '1=0';
+		}
+
+		return [
+			'sql'    => '(' . implode( ' OR ', $parts ) . ')',
+			'params' => $params,
+		];
 	}
 
 	private function matches_all_words( string $haystack, array $patterns ): bool {
@@ -255,7 +469,7 @@ final class WSS_Search_Engine {
 	}
 
 	/* ============================================================
-	 *  Теги
+	 *  Tags
 	 * ============================================================ */
 
 	private function search_tags( array $words ): array {
@@ -317,7 +531,7 @@ final class WSS_Search_Engine {
 	}
 
 	/* ============================================================
-	 *  Посты: full-list cache + slice
+	 *  Posts: full-list cache + slice
 	 * ============================================================ */
 
 	private function search_posts(
@@ -329,13 +543,18 @@ final class WSS_Search_Engine {
 		bool $is_api,
 		string $match
 	): array {
-		$scope = $is_api
-			? 'api_all'
-			: ( current_user_can( 'edit_others_posts' ) ? 'e' : 'u' . get_current_user_id() );
+		// The cache depends on visibility — may see others' posts or not —
+		// not on whether the request came via API or AJAX. The visibility
+		// mode is part of the key so a switch between shared and own never
+		// serves entries built under the other model.
+		$scope = current_user_can( 'edit_others_posts' )
+			? 'e'
+			: 'u' . (int) get_current_user_id();
 
 		$cache_key = 'wss_posts_' . WSS_Config::POSTS_CACHE_VER . '_'
 			. $this->cache->generation() . '_'
 			. $scope . '_'
+			. WSS_Config::visibility_mode() . '_'
 			. md5( wp_json_encode( [
 				'statuses'   => $filters['statuses'],
 				'date_range' => $filters['date_range'],
@@ -400,7 +619,7 @@ final class WSS_Search_Engine {
 	}
 
 	/**
-	 * Полный (несрезанный) список совпадений.
+	 * Complete (untruncated) match list.
 	 */
 	private function build_posts_list(
 		array $words,
@@ -416,7 +635,7 @@ final class WSS_Search_Engine {
 			return $exact ? [ $this->format_post_item( $exact, $words, true ) ] : [];
 		}
 
-		$rows = $this->query_fuzzy( $words, $patterns, $filters, $is_api );
+		$rows = $this->query_fuzzy( $words, $patterns, $filters );
 
 		$exact_post = null;
 		if ( $match === 'auto' ) {
@@ -452,49 +671,15 @@ final class WSS_Search_Engine {
 		return $out;
 	}
 
-	private function query_fuzzy( array $words, array $patterns, array $filters, bool $is_api ): array {
+	private function query_fuzzy( array $words, array $patterns, array $filters ): array {
 		global $wpdb;
 
 		$where  = [];
 		$params = [];
 
-		$selected_statuses = $filters['statuses'];
-
-		if ( $is_api ) {
-			$ph      = implode( ',', array_fill( 0, count( $selected_statuses ), '%s' ) );
-			$where[] = "p.post_status IN ($ph)";
-			foreach ( $selected_statuses as $s ) {
-				$params[] = $s;
-			}
-		} else {
-			if ( current_user_can( 'edit_others_posts' ) ) {
-				$ph      = implode( ',', array_fill( 0, count( $selected_statuses ), '%s' ) );
-				$where[] = "p.post_status IN ($ph)";
-				foreach ( $selected_statuses as $s ) {
-					$params[] = $s;
-				}
-			} else {
-				$publish_selected = in_array( 'publish', $selected_statuses, true );
-				$own_statuses     = array_values( array_diff( $selected_statuses, [ 'publish' ] ) );
-
-				$sub = [];
-				if ( $publish_selected ) {
-					$sub[] = "p.post_status = 'publish'";
-				}
-				if ( ! empty( $own_statuses ) ) {
-					$ph       = implode( ',', array_fill( 0, count( $own_statuses ), '%s' ) );
-					$sub[]    = "(p.post_author = %d AND p.post_status IN ($ph))";
-					$params[] = get_current_user_id();
-					foreach ( $own_statuses as $s ) {
-						$params[] = $s;
-					}
-				}
-				if ( empty( $sub ) ) {
-					$sub[] = '1=0';
-				}
-				$where[] = '(' . implode( ' OR ', $sub ) . ')';
-			}
-		}
+		$scope   = $this->status_scope( $filters );
+		$where[] = $scope['sql'];
+		$params  = array_merge( $params, $scope['params'] );
 
 		$where[]  = 'p.post_type = %s';
 		$params[] = (string) ( $filters['post_type'] ?? 'post' );
@@ -565,7 +750,7 @@ final class WSS_Search_Engine {
 	}
 
 	/* ============================================================
-	 *  Exact-match по permalink
+	 *  Exact match by permalink
 	 * ============================================================ */
 
 	private function find_exact_post( string $q, array $filters, bool $is_api ): ?WP_Post {
@@ -673,8 +858,19 @@ final class WSS_Search_Engine {
 		if ( $filters['author'] > 0 && (int) $post->post_author !== (int) $filters['author'] ) {
 			return false;
 		}
-		if ( ! $is_api && ! current_user_can( 'edit_others_posts' ) ) {
-			if ( $post->post_status !== 'publish' && (int) $post->post_author !== get_current_user_id() ) {
+		if ( ! current_user_can( 'edit_others_posts' ) ) {
+			$uid = (int) get_current_user_id();
+			if ( $uid <= 0 ) {
+				return false;
+			}
+
+			// Published posts are public; the shared statuses (drafts,
+			// scheduled, pending) are visible in the shared model only.
+			$shared = 'publish' === $post->post_status
+				|| ( 'shared' === WSS_Config::visibility_mode()
+					&& in_array( $post->post_status, WSS_Config::SHARED_STATUSES, true ) );
+
+			if ( ! $shared && (int) $post->post_author !== $uid ) {
 				return false;
 			}
 		}
@@ -897,32 +1093,31 @@ final class WSS_Search_Engine {
 	}
 
 	/* ============================================================
-	 *  Search links (новый scope)
+	 *  Search links (new scope)
 	 * ============================================================ */
 
-	private function search_links( array $words, array $input, array $filters, bool $is_api ): array {
+	/**
+	 * @return array|WP_Error
+	 */
+	private function search_links( array $words, array $input, array $filters, bool $is_api ) {
 		global $wpdb;
 		$table = $wpdb->prefix . WSS_Config::LINKS_TABLE;
 
 		$where  = [];
 		$params = [];
 
-		/* ---------- Post-level фильтры ---------- */
+		/* ---------- Post-level filters ---------- */
 
-		$statuses = $filters['statuses'];
-		$ph       = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
-		$where[]  = "p.post_status IN ($ph)";
-		foreach ( $statuses as $s ) {
-			$params[] = $s;
-		}
+		$scope   = $this->status_scope( $filters );
+		$where[] = $scope['sql'];
+		$params  = array_merge( $params, $scope['params'] );
 
 		$where[]  = 'p.post_type = %s';
 		$params[] = (string) ( $filters['post_type'] ?? 'post' );
 
-		if ( ! $is_api && ! current_user_can( 'edit_others_posts' ) ) {
-			$where[]  = 'p.post_author = %d';
-			$params[] = get_current_user_id();
-		} elseif ( ! empty( $filters['author'] ) && (int) $filters['author'] > 0 ) {
+		// The author filter only narrows the result set; visibility is
+		// enforced by status_scope().
+		if ( ! empty( $filters['author'] ) && (int) $filters['author'] > 0 ) {
 			$where[]  = 'p.post_author = %d';
 			$params[] = (int) $filters['author'];
 		}
@@ -965,7 +1160,7 @@ final class WSS_Search_Engine {
 			}
 		}
 
-		/* ---------- Link-level фильтры ---------- */
+		/* ---------- Link-level filters ---------- */
 
 		$match_type = 'all';
 
@@ -1006,7 +1201,7 @@ final class WSS_Search_Engine {
 			}
 		}
 
-		// Fallback: q → domain или anchor.
+		// Fallback: q → domain or anchor.
 		if ( $match_type === 'all' ) {
 			$q = (string) ( $filters['query'] ?? '' );
 			if ( $q !== '' ) {
@@ -1035,10 +1230,31 @@ final class WSS_Search_Engine {
 		$per_page = max( 1, min( WSS_Config::POSTS_PER_PAGE_MAX, (int) ( $input['per_page'] ?? WSS_Config::POSTS_PER_PAGE_MAX ) ) );
 		$offset   = ( $page - 1 ) * $per_page;
 
+		// An exact total needs a second query (COUNT). In batch mode it
+		// is not needed: has_more comes from LIMIT + 1.
+		$exact_total = ! isset( $input['exact_total'] ) || $this->to_bool( $input['exact_total'], true );
+
+		$fields = $this->parse_fields( $input['fields'] ?? null );
+		if ( is_wp_error( $fields ) ) {
+			return $fields;
+		}
+
+		// No link filter applied (for example an invalid URL came from
+		// batch). Returning every link would be meaningless and
+		// expensive, so answer with an empty result.
+		if ( $match_type === 'all' ) {
+			return [
+				'items'       => [],
+				'total_exact' => $exact_total,
+				'page'        => $page,
+				'per_page'    => $per_page,
+				'has_more'    => false,
+			];
+		}
+
 		if ( empty( $where ) ) {
 			return [
 				'items'    => [],
-				'total'    => 0,
 				'page'     => $page,
 				'per_page' => $per_page,
 				'has_more' => false,
@@ -1047,12 +1263,17 @@ final class WSS_Search_Engine {
 
 		$where_sql = implode( ' AND ', $where );
 
-		$count_sql = "SELECT COUNT(*)
-			FROM $table l
-			INNER JOIN {$wpdb->posts} p ON p.ID = l.post_id
-			WHERE $where_sql";
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$total = (int) $wpdb->get_var( $wpdb->prepare( $count_sql, $params ) );
+		$total = 0;
+		if ( $exact_total ) {
+			$count_sql = "SELECT COUNT(*)
+				FROM $table l
+				INNER JOIN {$wpdb->posts} p ON p.ID = l.post_id
+				WHERE $where_sql";
+			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			$total = (int) $wpdb->get_var( $wpdb->prepare( $count_sql, $params ) );
+		}
+
+		$limit = $exact_total ? $per_page : ( $per_page + 1 );
 
 		$sql = "SELECT l.id, l.post_id, l.url, l.url_norm, l.host, l.domain,
 					l.anchor, l.context, p.post_title, p.post_status
@@ -1062,7 +1283,7 @@ final class WSS_Search_Engine {
 			ORDER BY p.post_date DESC, l.id DESC
 			LIMIT %d OFFSET %d";
 
-		$params_page = array_merge( $params, [ $per_page, $offset ] );
+		$params_page = array_merge( $params, [ $limit, $offset ] );
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 		$rows = $wpdb->get_results( $wpdb->prepare( $sql, $params_page ) );
 
@@ -1087,12 +1308,15 @@ final class WSS_Search_Engine {
 			}
 		}
 
-		$fields = $input['fields'] ?? null;
-		if ( is_string( $fields ) ) {
-			$fields = array_values( array_filter( array_map( 'trim', explode( ',', $fields ) ) ) );
+		$has_more = $exact_total
+			? ( $page * $per_page ) < $total
+			: count( $items ) > $per_page;
+
+		if ( ! $exact_total && count( $items ) > $per_page ) {
+			$items = array_slice( $items, 0, $per_page );
 		}
-		if ( is_array( $fields ) && ! empty( $fields ) ) {
-			$fields = array_map( 'sanitize_key', $fields );
+
+		if ( $fields !== null ) {
 			foreach ( $items as &$item ) {
 				$filtered = [];
 				foreach ( $fields as $f ) {
@@ -1105,13 +1329,74 @@ final class WSS_Search_Engine {
 			unset( $item );
 		}
 
-		return [
-			'items'    => array_values( $items ),
-			'total'    => $total,
-			'page'     => $page,
-			'per_page' => $per_page,
-			'has_more' => ( $page * $per_page ) < $total,
+		$out = [
+			'items'       => array_values( $items ),
+			'total_exact' => $exact_total,
+			'page'        => $page,
+			'per_page'    => $per_page,
+			'has_more'    => (bool) $has_more,
 		];
+
+		if ( $exact_total ) {
+			$out['total'] = $total;
+		}
+		if ( $fields !== null ) {
+			$out['fields'] = array_values( $fields );
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Parses the fields parameter.
+	 *
+	 * Returns null (all fields), a field list (required fields added)
+	 * or WP_Error when the client asks for an unknown field: silently
+	 * dropping post_id/url/anchor is no longer allowed, it caused
+	 * broken integrations.
+	 *
+	 * @param mixed $fields
+	 * @return string[]|null|WP_Error
+	 */
+	private function parse_fields( $fields ) {
+		if ( $fields === null || $fields === '' || $fields === [] ) {
+			return null;
+		}
+		if ( is_string( $fields ) ) {
+			$fields = array_map( 'trim', explode( ',', $fields ) );
+		}
+		if ( ! is_array( $fields ) ) {
+			return new WP_Error(
+				'wss_invalid_fields',
+				__( 'Параметр fields должен быть списком через запятую или массивом.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
+
+		$fields = array_values( array_unique( array_filter( array_map(
+			static fn( $f ) => sanitize_key( (string) $f ),
+			$fields
+		) ) ) );
+
+		if ( empty( $fields ) ) {
+			return null;
+		}
+
+		$unknown = array_values( array_diff( $fields, WSS_Config::LINK_FIELDS ) );
+		if ( ! empty( $unknown ) ) {
+			return new WP_Error(
+				'wss_invalid_fields',
+				sprintf(
+					/* translators: 1: unknown fields, 2: available fields */
+					__( 'Неизвестные поля: %1$s. Доступны: %2$s.', 'wp-smart-search' ),
+					implode( ', ', $unknown ),
+					implode( ', ', WSS_Config::LINK_FIELDS )
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
+		return array_values( array_unique( array_merge( WSS_Config::LINK_FIELDS_REQUIRED, $fields ) ) );
 	}
 
 	private function parse_date_boundary( string $value, bool $is_to ): int {

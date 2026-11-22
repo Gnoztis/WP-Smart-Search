@@ -14,7 +14,7 @@ final class WSS_Rest_Controller {
 	}
 
 	public function register_hooks(): void {
-		// Ранний 401 без HTML/редиректа — до всей REST-инфраструктуры.
+		// Early 401 without HTML/redirect, before the REST stack loads.
 		add_action( 'init', [ $this, 'early_auth_check' ], 1 );
 
 		add_action( 'rest_api_init', [ $this, 'register_routes' ] );
@@ -23,6 +23,8 @@ final class WSS_Rest_Controller {
 		add_filter( 'rest_pre_dispatch',          [ $this, 'pre_dispatch_filter' ], 10, 3 );
 		add_filter( 'rest_post_dispatch',         [ $this, 'post_dispatch_filter' ], 10, 3 );
 
+		// Replace the core CORS handler with ours: strict allowlist for
+		// wss/*, exact core behaviour for every other route.
 		remove_filter( 'rest_pre_serve_request', 'rest_send_cors_headers' );
 		add_filter( 'rest_pre_serve_request', [ $this, 'cors_handler' ], 10, 4 );
 	}
@@ -35,6 +37,13 @@ final class WSS_Rest_Controller {
 			'args'                => $this->search_args(),
 		] );
 
+		register_rest_route( WSS_Config::REST_NAMESPACE, '/links/batch', [
+			'methods'             => [ 'POST' ],
+			'callback'            => [ $this, 'handle_links_batch' ],
+			'permission_callback' => [ $this, 'permission_check' ],
+			'args'                => $this->batch_args(),
+		] );
+
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/me', [
 			'methods'             => 'GET',
 			'callback'            => [ $this, 'handle_me' ],
@@ -43,10 +52,10 @@ final class WSS_Rest_Controller {
 	}
 
 	/* ============================================================
-	 *  Ранний 401: срабатывает на init ДО REST-роутинга.
-	 *  ВАЖНО: если WAF (nginx, Cloudflare, ModSecurity) блокирует
-	 *  /wp-json/wss/v1/* до PHP — этот фильтр не спасёт. Нужно
-	 *  добавить путь в whitelist WAF на уровне сервера.
+	 *  Early 401: fires on init, BEFORE REST routing.
+	 *  IMPORTANT: if a WAF (nginx, Cloudflare, ModSecurity) blocks
+	 *  /wp-json/wss/v1/* before PHP, this filter cannot help — the
+	 *  path must be allow-listed in the WAF.
 	 * ============================================================ */
 
 	public function early_auth_check(): void {
@@ -57,7 +66,7 @@ final class WSS_Rest_Controller {
 			return;
 		}
 		if ( $this->get_authorization_header() !== '' ) {
-			return; // есть заголовок — пусть REST обработает
+			return; // header present — let REST handle it
 		}
 
 		if ( ! headers_sent() ) {
@@ -74,7 +83,7 @@ final class WSS_Rest_Controller {
 	}
 
 	/* ============================================================
-	 *  Auth filter (только Application Password / Basic)
+	 *  Auth filter (Application Password / Basic only)
 	 * ============================================================ */
 
 	public function authentication_filter( $result ) {
@@ -85,7 +94,7 @@ final class WSS_Rest_Controller {
 			return $result;
 		}
 
-		// Без Authorization header — wss_unauthorized (даже если есть cookie).
+		// No Authorization header — wss_unauthorized (even with cookies).
 		if ( $this->get_authorization_header() === '' ) {
 			return new WP_Error(
 				'wss_unauthorized',
@@ -94,7 +103,7 @@ final class WSS_Rest_Controller {
 			);
 		}
 
-		// Ошибки ядра (basic auth) → wss_invalid_credentials.
+		// Core errors (basic auth) → wss_invalid_credentials.
 		if ( is_wp_error( $result ) ) {
 			return new WP_Error(
 				'wss_invalid_credentials',
@@ -123,7 +132,7 @@ final class WSS_Rest_Controller {
 	}
 
 	/* ============================================================
-	 *  Pre-dispatch — дублирующая проверка + OPTIONS
+	 *  Pre-dispatch — duplicate check + OPTIONS
 	 * ============================================================ */
 
 	public function pre_dispatch_filter( $result, $server, $request ) {
@@ -175,6 +184,13 @@ final class WSS_Rest_Controller {
 	}
 
 	public function permission_check( $request ) {
+		// Defense in depth: we do not rely on the filter order of
+		// rest_authentication_errors — /wss/v1/* requires the
+		// Authorization header (Application Password); cookie auth is
+		// not supported here.
+		if ( $this->get_authorization_header() === '' ) {
+			return new WP_Error( 'wss_unauthorized', __( 'Требуется Application Password.', 'wp-smart-search' ), [ 'status' => 401 ] );
+		}
 		if ( ! is_user_logged_in() ) {
 			return new WP_Error( 'wss_unauthorized', __( 'Требуется Application Password.', 'wp-smart-search' ), [ 'status' => 401 ] );
 		}
@@ -185,7 +201,7 @@ final class WSS_Rest_Controller {
 	}
 
 	/* ============================================================
-	 *  JSON-щит: HTML-строка в ответе → JSON 500
+	 *  JSON shield: an HTML string in the response becomes a JSON 500
 	 * ============================================================ */
 
 	public function post_dispatch_filter( $response, $server, $request ) {
@@ -221,37 +237,40 @@ final class WSS_Rest_Controller {
 	}
 
 	/* ============================================================
-	 *  CORS (строгий белый список для /wss/v1/*)
+	 *  CORS (strict allowlist for /wss/v1/*)
 	 * ============================================================ */
 
 	public function cors_handler( $served, $result, $request, $server ) {
-		$origin = function_exists( 'get_http_origin' ) ? get_http_origin() : '';
-		if ( ! $origin ) {
-			return $served;
-		}
-
-		$origin = esc_url_raw( (string) $origin );
 		$route  = $request instanceof WP_REST_Request ? (string) $request->get_route() : '';
 		$is_wss = strpos( $route, '/' . WSS_Config::REST_NAMESPACE . '/' ) === 0;
 
-		if ( $is_wss ) {
-			if ( ! $this->is_origin_allowed( $origin ) ) {
-				return $served;
-			}
-			header( 'Access-Control-Allow-Origin: ' . $origin );
+		// Other REST routes are served by core — no relaxations from us.
+		if ( ! $is_wss ) {
+			return function_exists( 'rest_send_cors_headers' ) ? rest_send_cors_headers( $served ) : $served;
+		}
+
+		$origin = function_exists( 'get_http_origin' ) ? (string) get_http_origin() : '';
+		if ( $origin === '' ) {
+			return $served;
+		}
+
+		$origin = esc_url_raw( $origin );
+		if ( $origin === '' || ! $this->is_origin_allowed( $origin ) ) {
+			return $served;
+		}
+
+		if ( ! headers_sent() ) {
+			// Auth for wss/* is header-only, cookies are irrelevant, so
+			// Access-Control-Allow-Credentials is not sent.
+			// The value passed esc_url_raw() (strips CR/LF), so header
+			// injection is impossible.
+			header( 'Access-Control-Allow-Origin: ' . $origin ); // phpcs:ignore -- esc_url_raw() strips CR/LF, so header injection is impossible.
 			header( 'Access-Control-Allow-Methods: GET, POST, OPTIONS' );
-			header( 'Access-Control-Allow-Credentials: true' );
 			header( 'Access-Control-Allow-Headers: Authorization, Content-Type' );
 			header( 'Access-Control-Expose-Headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After' );
 			header( 'Access-Control-Max-Age: 86400' );
 			header( 'Vary: Origin', false );
-			return $served;
 		}
-
-		header( 'Access-Control-Allow-Origin: ' . $origin );
-		header( 'Access-Control-Allow-Methods: POST, GET, OPTIONS, PUT, DELETE' );
-		header( 'Access-Control-Allow-Credentials: true' );
-		header( 'Access-Control-Allow-Headers: Authorization, X-WP-Nonce, Content-Disposition, Content-MD5, Content-Type' );
 
 		return $served;
 	}
@@ -284,22 +303,42 @@ final class WSS_Rest_Controller {
 	}
 
 	/* ============================================================
-	 *  Хелперы
+	 *  Helpers
 	 * ============================================================ */
 
 	private function is_wss_route_request(): bool {
+		$route = $this->requested_rest_route();
+		return $route !== '' && strpos( $route, '/' . WSS_Config::REST_NAMESPACE . '/' ) === 0;
+	}
+
+	/**
+	 * REST route of the current request, resolved without booting REST.
+	 *
+	 * We used to look for /wss/v1/ inside REQUEST_URI, so any
+	 * unrelated URL containing it got a 401 from the init hook.
+	 */
+	private function requested_rest_route(): string {
+		$raw = trim( wp_unslash( (string) ( $_GET['rest_route'] ?? '' ) ) );
+		if ( $raw !== '' ) {
+			return '/' . ltrim( $raw, '/' );
+		}
+
 		$uri = isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '';
 		if ( $uri === '' ) {
-			return false;
+			return '';
 		}
-		if ( strpos( $uri, '/' . WSS_Config::REST_NAMESPACE . '/' ) !== false ) {
-			return true;
+
+		$rest_path = (string) wp_parse_url( rest_url(), PHP_URL_PATH );
+		$path      = (string) wp_parse_url( $uri, PHP_URL_PATH );
+
+		if ( $rest_path === '' || $rest_path === '/' || strpos( $rest_path, 'rest_route' ) !== false || $path === '' ) {
+			return '';
 		}
-		// Plain permalinks: /?rest_route=/wss/v1/search (возможно URL-encoded).
-		if ( preg_match( '#[?&]rest_route=(?:%2F|/)wss(?:%2F|/)v1(?:%2F|/)#i', $uri ) ) {
-			return true;
+		if ( strpos( $path, $rest_path ) !== 0 ) {
+			return '';
 		}
-		return false;
+
+		return '/' . ltrim( substr( $path, strlen( $rest_path ) ), '/' );
 	}
 
 	private function requested_method(): string {
@@ -332,32 +371,159 @@ final class WSS_Rest_Controller {
 
 	private function search_args(): array {
 		return [
-			'q'          => [ 'description' => __( 'Поисковый запрос (мин. 2 символа).', 'wp-smart-search' ), 'type' => 'string' ],
-			'refang'     => [ 'description' => __( 'Auto-refang (по умолчанию true).', 'wp-smart-search' ), 'type' => 'boolean' ],
-			'scope'      => [
-				'description' => __( 'posts | links | all (по умолчанию posts).', 'wp-smart-search' ),
-				'type'        => 'string',
-				'enum'        => WSS_Config::SCOPES,
+			'q'          => [
+				'description'       => __( 'Поисковый запрос (мин. 2 символа); слова ищутся по основам, между словами — И.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
 			],
-			'type'       => [ 'description' => __( 'all | tags | posts (по умолчанию posts для API).', 'wp-smart-search' ), 'type' => 'string' ],
-			'match'      => [ 'description' => __( 'auto | fuzzy | exact (по умолчанию auto).', 'wp-smart-search' ), 'type' => 'string' ],
-			'page'       => [ 'description' => __( 'Страница (1..N).', 'wp-smart-search' ), 'type' => 'integer' ],
-			'per_page'   => [ 'description' => __( 'Элементов на страницу (1..50).', 'wp-smart-search' ), 'type' => 'integer' ],
-			'statuses'   => [ 'description' => __( 'Массив статусов или строка через запятую.', 'wp-smart-search' ) ],
-			'date_range' => [ 'description' => __( 'any | today | week | month | year', 'wp-smart-search' ), 'type' => 'string' ],
-			'date_from'  => [ 'description' => __( 'С ISO-даты (включительно).', 'wp-smart-search' ), 'type' => 'string' ],
-			'date_to'    => [ 'description' => __( 'По ISO-дату (включительно).', 'wp-smart-search' ), 'type' => 'string' ],
-			'author'     => [ 'description' => __( 'ID автора.', 'wp-smart-search' ), 'type' => 'integer' ],
-			'post_type'  => [ 'description' => __( 'post | page | … (по умолчанию post).', 'wp-smart-search' ), 'type' => 'string' ],
-			'orderby'    => [ 'description' => __( 'date_desc | date_asc', 'wp-smart-search' ), 'type' => 'string' ],
-			'exclude'    => [ 'description' => __( 'ID записей для исключения.', 'wp-smart-search' ) ],
-			'exclude_id' => [ 'description' => __( 'ID записи (скаляр или массив).', 'wp-smart-search' ) ],
+			'refang'     => [
+				'description'       => __( 'Auto-refang (по умолчанию true).', 'wp-smart-search' ),
+				'type'              => 'boolean',
+				'sanitize_callback' => 'rest_sanitize_boolean',
+			],
+			'scope'      => [
+				'description'       => __( 'posts | links | all (по умолчанию posts).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'enum'              => WSS_Config::SCOPES,
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'type'       => [
+				'description'       => __( 'all | tags | posts (по умолчанию posts для API).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'match'      => [
+				'description'       => __( 'auto | fuzzy | exact (по умолчанию auto).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'enum'              => WSS_Config::MATCH_MODES,
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'page'       => [
+				'description'       => __( 'Страница (1..N).', 'wp-smart-search' ),
+				'type'              => 'integer',
+				'sanitize_callback' => 'absint',
+			],
+			'per_page'   => [
+				'description'       => __( 'Элементов на страницу (1..50).', 'wp-smart-search' ),
+				'type'              => 'integer',
+				'sanitize_callback' => 'absint',
+			],
+			'statuses'   => [
+				'description' => __( 'Массив статусов или строка через запятую. Неизвестный статус — 400.', 'wp-smart-search' ),
+			],
+			'date_range' => [
+				'description'       => __( 'any | today | week | month | year', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'date_from'  => [
+				'description'       => __( 'С ISO-даты (включительно).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'date_to'    => [
+				'description'       => __( 'По ISO-дату (включительно).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'author'     => [
+				'description'       => __( 'ID автора (только для edit_others_posts).', 'wp-smart-search' ),
+				'type'              => 'integer',
+				'sanitize_callback' => 'absint',
+			],
+			'post_type'  => [
+				'description'       => __( 'post | page | … (по умолчанию post); неизвестный тип — 400.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'orderby'    => [
+				'description'       => __( 'date_desc | date_asc', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'exclude'    => [
+				'description' => __( 'ID записей для исключения (массив, максимум 200).', 'wp-smart-search' ),
+			],
+			'exclude_id' => [
+				'description' => __( 'ID записи (скаляр или массив).', 'wp-smart-search' ),
+			],
 			// links scope:
-			'url'        => [ 'description' => __( 'Точный URL (нормализуется).', 'wp-smart-search' ), 'type' => 'string' ],
-			'domain'     => [ 'description' => __( 'Registrable domain (включая поддомены).', 'wp-smart-search' ), 'type' => 'string' ],
-			'host'       => [ 'description' => __( 'Точный host (без поддоменов).', 'wp-smart-search' ), 'type' => 'string' ],
-			'anchor'     => [ 'description' => __( 'Подстрока в anchor-тексте.', 'wp-smart-search' ), 'type' => 'string' ],
-			'fields'     => [ 'description' => __( 'Список полей links.items через запятую.', 'wp-smart-search' ) ],
+			'url'        => [
+				'description'       => __( 'Точный URL (нормализуется).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'domain'     => [
+				'description'       => __( 'Registrable domain (включая поддомены).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'host'       => [
+				'description'       => __( 'Точный host (без поддоменов).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'anchor'     => [
+				'description'       => __( 'Подстрока в anchor-тексте.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'fields'     => [
+				'description' => sprintf(
+					/* translators: 1: available fields, 2: required fields */
+					__( 'Список полей links.items через запятую. Доступны: %1$s. Всегда возвращаются: %2$s.', 'wp-smart-search' ),
+					implode( ', ', WSS_Config::LINK_FIELDS ),
+					implode( ', ', WSS_Config::LINK_FIELDS_REQUIRED )
+				),
+			],
+			'exact_total' => [
+				'description'       => __( 'Считать точный total (по умолчанию true; false экономит один запрос COUNT).', 'wp-smart-search' ),
+				'type'              => 'boolean',
+				'sanitize_callback' => 'rest_sanitize_boolean',
+			],
+		];
+	}
+
+	private function batch_args(): array {
+		$item = [ 'type' => 'string' ];
+
+		return [
+			'domains'    => [
+				'description' => __( 'Домены для поиска ссылок (максимум 50 за вызов).', 'wp-smart-search' ),
+				'type'        => 'array',
+				'items'       => $item,
+			],
+			'hosts'      => [
+				'description' => __( 'Точные хосты для поиска ссылок.', 'wp-smart-search' ),
+				'type'        => 'array',
+				'items'       => $item,
+			],
+			'urls'       => [
+				'description' => __( 'Точные URL для поиска ссылок.', 'wp-smart-search' ),
+				'type'        => 'array',
+				'items'       => $item,
+			],
+			'anchors'    => [
+				'description' => __( 'Подстроки anchor-текста.', 'wp-smart-search' ),
+				'type'        => 'array',
+				'items'       => $item,
+			],
+			'per_page'   => [
+				'description'       => __( 'Элементов на каждый запрос (1..50, по умолчанию 5).', 'wp-smart-search' ),
+				'type'              => 'integer',
+				'sanitize_callback' => 'absint',
+			],
+			'post_type'  => [
+				'description'       => __( 'Тип записи (по умолчанию post).', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'statuses'   => [
+				'description' => __( 'Массив статусов или строка через запятую.', 'wp-smart-search' ),
+			],
+			'fields'     => [
+				'description' => __( 'Список полей links.items через запятую.', 'wp-smart-search' ),
+			],
 		];
 	}
 
@@ -379,8 +545,8 @@ final class WSS_Rest_Controller {
 		$q_raw = $request->get_param( 'q' );
 		$q_str = is_string( $q_raw ) ? trim( (string) $q_raw ) : '';
 
-		// Для scope=links параметр q может быть не задан — тогда q берётся из
-		// url/domain/host/anchor внутри движка. Для posts/all — q обязателен.
+		// For scope=links q may be omitted — the engine then takes it from
+		// url/domain/host/anchor. For posts/all q is required.
 		$scope = (string) ( $request->get_param( 'scope' ) ?? 'posts' );
 		$scope = sanitize_key( $scope );
 		if ( ! in_array( $scope, WSS_Config::SCOPES, true ) ) {
@@ -395,7 +561,7 @@ final class WSS_Rest_Controller {
 		$has_link_filter = ( $url_p !== '' || $domain_p !== '' || $host_p !== '' || $anchor_p !== '' );
 
 		if ( $scope === 'links' && $q_str === '' && $has_link_filter ) {
-			// q формируется движком из url/domain/host/anchor.
+			// q is derived by the engine from url/domain/host/anchor.
 			$q_str = $url_p !== '' ? $url_p
 				: ( $domain_p !== '' ? $domain_p
 				: ( $host_p !== '' ? $host_p : $anchor_p ) );
@@ -439,33 +605,135 @@ final class WSS_Rest_Controller {
 			'host'       => $host_p,
 			'anchor'     => $anchor_p,
 			'fields'     => $request->get_param( 'fields' ),
+			'exact_total' => $request->get_param( 'exact_total' ),
 		];
 
 		$result = $this->engine->do_search( $input, true );
 		if ( is_wp_error( $result ) ) {
-			return new WP_Error(
-				'wss_' . $result->get_error_code(),
-				$result->get_error_message(),
-				[ 'status' => 400 ]
-			);
+			return $this->as_rest_error( $result );
 		}
 
 		return new WP_REST_Response( $result, 200 );
 	}
 
+	/**
+	 * Single engine error format: wss_* code, status from data (400 by default).
+	 */
+	private function as_rest_error( WP_Error $error ): WP_Error {
+		$data   = (array) $error->get_error_data();
+		$status = isset( $data['status'] ) ? (int) $data['status'] : 400;
+		$code   = (string) $error->get_error_code();
+
+		if ( strpos( $code, 'wss_' ) !== 0 ) {
+			$code = 'wss_' . $code;
+		}
+
+		return new WP_Error( $code, $error->get_error_message(), [ 'status' => $status ] );
+	}
+
+	/**
+	 * Batch link search: up to WSS_Config::BATCH_MAX lookups per call.
+	 */
+	public function handle_links_batch( WP_REST_Request $request ) {
+		$rl = $this->rate_limiter->check();
+		$this->rate_limiter->send_headers( $rl );
+		if ( empty( $rl['allowed'] ) ) {
+			return new WP_Error(
+				'wss_rate_limited',
+				__( 'Слишком много запросов. Подождите минуту.', 'wp-smart-search' ),
+				[ 'status' => 429 ]
+			);
+		}
+
+		$map     = [ 'domains' => 'domain', 'hosts' => 'host', 'urls' => 'url', 'anchors' => 'anchor' ];
+		$lookups = [];
+		$total   = 0;
+
+		foreach ( $map as $param => $type ) {
+			$values = $request->get_param( $param );
+			if ( ! is_array( $values ) ) {
+				continue;
+			}
+			foreach ( $values as $value ) {
+				if ( ! is_string( $value ) ) {
+					continue;
+				}
+				$value = trim( $value );
+				if ( $value === '' ) {
+					continue;
+				}
+				if ( mb_strlen( $value ) > 2048 ) {
+					return new WP_Error(
+						'wss_batch_value_too_long',
+						__( 'Значение в batch-запросе длиннее 2048 символов.', 'wp-smart-search' ),
+						[ 'status' => 400 ]
+					);
+				}
+				$total++;
+				if ( count( $lookups ) < WSS_Config::BATCH_MAX ) {
+					$lookups[] = [ $type => $value ];
+				}
+			}
+		}
+
+		if ( empty( $lookups ) ) {
+			return new WP_Error(
+				'wss_empty_batch',
+				__( 'Передайте хотя бы один домен, хост, URL или anchor.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
+
+		$input = [
+			'per_page'  => $request->get_param( 'per_page' ),
+			'post_type' => (string) ( $request->get_param( 'post_type' ) ?? 'post' ),
+			'statuses'  => ( $request->get_param( 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES ),
+			'fields'    => $request->get_param( 'fields' ),
+		];
+
+		$result = $this->engine->do_links_batch( $lookups, $input, true );
+		if ( is_wp_error( $result ) ) {
+			return $this->as_rest_error( $result );
+		}
+
+		$result['meta']['truncated'] = $total > count( $lookups );
+		$result['meta']['requested'] = $total;
+
+		return new WP_REST_Response( $result, 200 );
+	}
+
 	public function handle_me( WP_REST_Request $request ) {
-		$user = wp_get_current_user();
+		$user  = wp_get_current_user();
+		$can   = current_user_can( WSS_Config::CAPABILITY );
+		$multi = current_user_can( 'edit_others_posts' );
+		$mode  = WSS_Config::visibility_mode();
+
 		return new WP_REST_Response( [
 			'id'                   => (int) $user->ID,
 			'name'                 => (string) $user->display_name,
 			'roles'                => array_values( (array) $user->roles ),
-			'can_search'           => true,
-			'can_filter_by_author' => current_user_can( 'edit_others_posts' ),
+			'can_search'           => $can,
+			'can_filter_by_author' => $multi,
 			'allowed_statuses'     => WSS_Config::ALLOWED_STATUSES,
+			// shared: posts of every author in these statuses are visible,
+			// which is what duplicate checks before publishing rely on.
+			'visibility_mode'      => $mode,
+			'visible_statuses'     => $multi
+				? WSS_Config::ALLOWED_STATUSES
+				: ( 'shared' === $mode ? WSS_Config::SHARED_STATUSES : [ 'publish' ] ),
+			// Private posts stay with their author (and with editors).
+			'private_scope'        => $multi ? 'all' : 'own',
 			'max_per_page'         => WSS_Config::POSTS_PER_PAGE_MAX,
+			'max_words'            => WSS_Config::MAX_WORDS,
+			'max_query_len'        => WSS_Config::MAX_QUERY_LEN,
+			'batch_limit'          => WSS_Config::BATCH_MAX,
+			'link_fields'          => WSS_Config::LINK_FIELDS,
+			'required_link_fields' => WSS_Config::LINK_FIELDS_REQUIRED,
 			'plugin_version'       => WSS_VERSION,
 			'api_version'          => 'v1',
-			'match_modes'          => [ 'auto', 'fuzzy', 'exact' ],
+			// redis | none — see WSS_Cache::backend().
+			'cache_backend'        => WSS_Cache::backend(),
+			'match_modes'          => WSS_Config::MATCH_MODES,
 			'scopes'               => WSS_Config::SCOPES,
 		], 200 );
 	}

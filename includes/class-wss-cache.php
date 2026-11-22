@@ -3,12 +3,44 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
+/**
+ * Cache storage for search results.
+ *
+ * The only backend is the PHP redis extension (phpredis) reached over a
+ * direct connection: no other plugin, drop-in or WordPress object cache is
+ * required or relied upon.
+ *
+ * Resolution, lazily on the first cache operation:
+ *
+ *  1. redis — extension_loaded( 'redis' ) is true and the server from
+ *     WSS_REDIS_* / the wss_redis_config filter answers.
+ *  2. none — the extension is missing or Redis does not answer. The search
+ *     works without cache and never writes cache entries into wp_options.
+ *
+ * The probe happens at most once per request and is skipped for RETRY_TTL
+ * seconds after a failure, so a dead Redis never slows requests down with
+ * connection timeouts.
+ *
+ * Transients are not used as a cache fallback on purpose: they live in the
+ * options table, which costs more than the query they are supposed to save.
+ * They are still used for rate limit counters when Redis is unavailable,
+ * because a limiter without storage would silently disappear.
+ */
 final class WSS_Cache {
 
-	private static ?bool   $redis_ready = null;
-	private static ?Redis  $redis       = null;
-	private static ?string $ns          = null;
-	private static bool    $purge_done  = false;
+	/** Autoloaded option: unix time until which Redis is not probed. */
+	private const DOWN_OPTION = 'wss_redis_down_until';
+
+	/** Seconds to skip Redis after a failed connection attempt. */
+	private const RETRY_TTL = 60;
+
+	/** Upper bound for a single connect() call, seconds. */
+	private const CONNECT_TIMEOUT = 0.2;
+
+	private static ?Redis  $redis      = null;
+	private static ?string $backend    = null;
+	private static ?string $ns         = null;
+	private static bool    $purge_done = false;
 
 	public function register_hooks(): void {
 		add_action( 'save_post',        [ $this, 'maybe_bump_after_post_save' ], 10, 3 );
@@ -20,13 +52,116 @@ final class WSS_Cache {
 		add_action( 'transition_post_status', [ $this, 'handle_status_transition' ], 10, 3 );
 	}
 
+	/* ============================================================
+	 *  Backend resolution
+	 * ============================================================ */
+
+	/**
+	 * Active backend: redis or none.
+	 */
+	public static function backend(): string {
+		if ( self::$backend !== null ) {
+			return self::$backend;
+		}
+
+		if ( self::redis_client() instanceof Redis ) {
+			self::$backend = 'redis';
+			return self::$backend;
+		}
+
+		self::$backend = 'none';
+		return self::$backend;
+	}
+
+	public static function is_available(): bool {
+		return 'none' !== self::backend();
+	}
+
+	/**
+	 * Lazily connects to Redis, honouring the failure backoff.
+	 */
+	private static function redis_client(): ?Redis {
+		if ( self::$redis instanceof Redis ) {
+			return self::$redis;
+		}
+
+		if ( ! extension_loaded( 'redis' ) || ! class_exists( 'Redis' ) ) {
+			return null;
+		}
+
+		$down_until = (int) get_option( self::DOWN_OPTION, 0 );
+		if ( $down_until > time() ) {
+			return null;
+		}
+
+		$config = self::redis_config();
+
+		try {
+			$client = new Redis();
+			if ( ! $client->connect( (string) $config['host'], (int) $config['port'], (float) $config['timeout'] ) ) {
+				self::mark_down( 'connect() returned false' );
+				return null;
+			}
+			if ( $config['password'] !== '' && ! $client->auth( (string) $config['password'] ) ) {
+				self::mark_down( 'AUTH failed' );
+				return null;
+			}
+			if ( (int) $config['database'] > 0 && ! $client->select( (int) $config['database'] ) ) {
+				self::mark_down( 'SELECT failed' );
+				return null;
+			}
+
+			self::$redis = $client;
+			return $client;
+		} catch ( Throwable $e ) {
+			self::mark_down( $e->getMessage() );
+			return null;
+		}
+	}
+
+	/**
+	 * Records a failed Redis operation and stops probing for RETRY_TTL.
+	 */
+	private static function mark_down( string $reason = '' ): void {
+		self::$redis   = null;
+		self::$backend = 'none';
+
+		update_option( self::DOWN_OPTION, time() + self::RETRY_TTL, true );
+
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG && $reason !== '' ) {
+			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- debug only.
+			error_log( '[wp-smart-search] cache backend unavailable: ' . $reason );
+		}
+	}
+
+	private static function redis_config(): array {
+		$config = [
+			'host'     => '127.0.0.1',
+			'port'     => 6379,
+			'timeout'  => self::CONNECT_TIMEOUT,
+			'password' => '',
+			'database' => 0,
+		];
+		if ( defined( 'WSS_REDIS_HOST' ) )     { $config['host']     = (string) WSS_REDIS_HOST; }
+		if ( defined( 'WSS_REDIS_PORT' ) )     { $config['port']     = (int)    WSS_REDIS_PORT; }
+		if ( defined( 'WSS_REDIS_TIMEOUT' ) )  { $config['timeout']  = (float)  WSS_REDIS_TIMEOUT; }
+		if ( defined( 'WSS_REDIS_PASSWORD' ) ) { $config['password'] = (string) WSS_REDIS_PASSWORD; }
+		if ( defined( 'WSS_REDIS_DATABASE' ) ) { $config['database'] = (int)    WSS_REDIS_DATABASE; }
+
+		return (array) apply_filters( 'wss_redis_config', $config );
+	}
+
+	/* ============================================================
+	 *  Invalidation
+	 * ============================================================ */
+
 	public function generation(): int {
 		return (int) get_option( WSS_Config::CACHE_GEN_OPTION, 0 );
 	}
 
 	public function bump_generation(): void {
-		$v = (int) get_option( WSS_Config::CACHE_GEN_OPTION, 0 );
-		update_option( WSS_Config::CACHE_GEN_OPTION, $v + 1, true );
+		$value = (int) get_option( WSS_Config::CACHE_GEN_OPTION, 0 );
+		update_option( WSS_Config::CACHE_GEN_OPTION, $value + 1, true );
 	}
 
 	public function maybe_bump_after_post_save( $post_id, $post = null, $update = null ): void {
@@ -66,170 +201,121 @@ final class WSS_Cache {
 		$this->purge_all();
 	}
 
+	/**
+	 * Invalidation is generation based: every key carries the generation,
+	 * so bumping it makes all existing entries unreachable. Entries also
+	 * carry a TTL, so Redis does not accumulate dead keys indefinitely.
+	 *
+	 * A SCAN + DEL sweep is deliberately not performed here: it is more
+	 * expensive than letting the TTL expire and adds no correctness.
+	 */
 	private function purge_all(): void {
 		if ( self::$purge_done ) {
 			return;
 		}
 		self::$purge_done = true;
-		$this->purge_redis();
-		$this->purge_transients();
+
 		$this->bump_generation();
 	}
 
-	private function purge_redis(): void {
-		if ( ! $this->redis_available() || self::$redis === null ) {
-			return;
-		}
-		$pattern = $this->redis_key( 'wss_*' );
-		try {
-			$iterator = null;
-			do {
-				$keys = self::$redis->scan( $iterator, $pattern, 500 );
-				if ( is_array( $keys ) && ! empty( $keys ) ) {
-					self::$redis->del( $keys );
-				}
-			} while ( $iterator > 0 );
-		} catch ( Throwable $e ) {
-			// TTL.
-		}
-	}
+	/* ============================================================
+	 *  Read / write
+	 * ============================================================ */
 
-	private function purge_transients(): void {
-		global $wpdb;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
-		$names = $wpdb->get_col(
-			$wpdb->prepare(
-				"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
-				$wpdb->esc_like( '_transient_wss_' ) . '%'
-			)
-		);
-		if ( ! is_array( $names ) || empty( $names ) ) {
-			return;
-		}
-		$prefix = '_transient_';
-		$plen   = strlen( $prefix );
-		foreach ( $names as $name ) {
-			if ( strpos( $name, $prefix ) !== 0 ) {
-				continue;
-			}
-			$t = substr( $name, $plen );
-			if ( $t !== '' ) {
-				delete_transient( $t );
-			}
-		}
-	}
-
-	private function redis_available(): bool {
-		if ( self::$redis_ready !== null ) {
-			return self::$redis_ready;
-		}
-		self::$redis_ready = false;
-		if ( ! extension_loaded( 'redis' ) || ! class_exists( 'Redis' ) ) {
-			return false;
-		}
-		$cfg = $this->redis_config();
-		try {
-			$client = new Redis();
-			$ok     = @$client->connect( $cfg['host'], $cfg['port'], $cfg['timeout'] );
-			if ( ! $ok ) {
-				return false;
-			}
-			if ( $cfg['password'] !== '' && @$client->auth( $cfg['password'] ) !== true ) {
-				return false;
-			}
-			if ( $cfg['database'] > 0 && ! @$client->select( $cfg['database'] ) ) {
-				return false;
-			}
-			self::$redis       = $client;
-			self::$redis_ready = true;
-			return true;
-		} catch ( Throwable $e ) {
-			self::$redis = null;
-			return false;
-		}
-	}
-
-	private function redis_config(): array {
-		$cfg = [
-			'host'     => '127.0.0.1',
-			'port'     => 6379,
-			'timeout'  => 0.1,
-			'password' => '',
-			'database' => 0,
-		];
-		if ( defined( 'WSS_REDIS_HOST' ) )     { $cfg['host']     = (string) WSS_REDIS_HOST; }
-		if ( defined( 'WSS_REDIS_PORT' ) )     { $cfg['port']     = (int)    WSS_REDIS_PORT; }
-		if ( defined( 'WSS_REDIS_TIMEOUT' ) )  { $cfg['timeout']  = (float)  WSS_REDIS_TIMEOUT; }
-		if ( defined( 'WSS_REDIS_PASSWORD' ) ) { $cfg['password'] = (string) WSS_REDIS_PASSWORD; }
-		if ( defined( 'WSS_REDIS_DATABASE' ) ) { $cfg['database'] = (int)    WSS_REDIS_DATABASE; }
-		return (array) apply_filters( 'wss_redis_config', $cfg );
-	}
-
-	public function redis_key( string $key ): string {
+	private static function redis_key( string $key ): string {
 		if ( self::$ns === null ) {
 			self::$ns = substr( md5( home_url( '/' ) ), 0, 12 );
 		}
 		return 'wss:' . self::$ns . ':' . $key;
 	}
 
+	/**
+	 * Cached array or null on miss. Never throws: a cache failure must not
+	 * break the search request.
+	 */
 	public function get( string $key ): ?array {
-		if ( $this->redis_available() && self::$redis !== null ) {
-			try {
-				$raw = self::$redis->get( $this->redis_key( $key ) );
-				if ( is_string( $raw ) && $raw !== '' ) {
-					$data = @unserialize( $raw, [ 'allowed_classes' => false ] );
-					if ( is_array( $data ) ) {
-						return $data;
-					}
-				}
+		if ( 'redis' !== self::backend() ) {
+			return null;
+		}
+
+		$client = self::$redis;
+		if ( ! $client instanceof Redis ) {
+			return null;
+		}
+
+		try {
+			$raw = $client->get( self::redis_key( $key ) );
+			if ( ! is_string( $raw ) || $raw === '' ) {
 				return null;
-			} catch ( Throwable $e ) {
-				// fallback
 			}
+			$data = unserialize( $raw, [ 'allowed_classes' => false ] );
+			return is_array( $data ) ? $data : null;
+		} catch ( Throwable $e ) {
+			self::mark_down( $e->getMessage() );
+			return null;
 		}
-		$val = get_transient( $key );
-		return is_array( $val ) ? $val : null;
 	}
 
-	public function set( string $key, array $value, int $ttl ): void {
+	/**
+	 * Stores an array. Returns true when the value actually reached Redis;
+	 * a false result is not an error — caching is optional.
+	 */
+	public function set( string $key, array $value, int $ttl ): bool {
 		$ttl = max( 1, $ttl );
-		if ( $this->redis_available() && self::$redis !== null ) {
-			try {
-				$ok = self::$redis->setEx(
-					$this->redis_key( $key ),
-					$ttl,
-					serialize( $value )
-				);
-				if ( $ok ) {
-					return;
-				}
-			} catch ( Throwable $e ) {
-				// fallback
-			}
+
+		if ( 'redis' !== self::backend() ) {
+			return false;
 		}
-		set_transient( $key, $value, $ttl );
+
+		$client = self::$redis;
+		if ( ! $client instanceof Redis ) {
+			return false;
+		}
+
+		try {
+			return (bool) $client->setEx( self::redis_key( $key ), $ttl, serialize( $value ) );
+		} catch ( Throwable $e ) {
+			self::mark_down( $e->getMessage() );
+			return false;
+		}
 	}
 
+	/* ============================================================
+	 *  Rate limiting
+	 * ============================================================ */
+
+	/**
+	 * Increments a counter and returns [count, ttl].
+	 *
+	 * Uses Redis when it is available and transients otherwise — a limiter
+	 * without storage would let requests through unchecked.
+	 *
+	 * @return array{count:int,ttl:int}
+	 */
 	public function rate_limit_incr( string $key, int $ttl ): array {
-		if ( $this->redis_available() && self::$redis !== null ) {
+		$ttl = max( 1, $ttl );
+
+		if ( 'redis' === self::backend() && self::$redis instanceof Redis ) {
 			try {
-				$rkey  = $this->redis_key( $key );
-				$count = (int) self::$redis->incr( $rkey );
+				$redis_key = self::redis_key( $key );
+				$count     = (int) self::$redis->incr( $redis_key );
 				if ( $count === 1 ) {
-					self::$redis->expire( $rkey, $ttl );
+					self::$redis->expire( $redis_key, $ttl );
 				}
-				$t = (int) self::$redis->ttl( $rkey );
-				if ( $t < 0 ) {
-					$t = $ttl;
-				}
-				return [ 'count' => $count, 'ttl' => $t ];
+				$remaining = (int) self::$redis->ttl( $redis_key );
+				return [
+					'count' => $count,
+					'ttl'   => $remaining > 0 ? $remaining : $ttl,
+				];
 			} catch ( Throwable $e ) {
-				// fallback
+				self::mark_down( $e->getMessage() );
 			}
 		}
+
 		$count = (int) get_transient( $key );
 		$count++;
 		set_transient( $key, $count, $ttl );
+
 		return [ 'count' => $count, 'ttl' => $ttl ];
 	}
 }

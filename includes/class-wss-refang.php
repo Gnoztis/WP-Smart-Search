@@ -6,8 +6,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 final class WSS_Refang {
 
 	/**
-	 * Деобфускация: hXXp → http, [.] → ., [:] → :, [@] → @, [://] → ://, (.) → .
-	 * Порядок: длинные составные → одиночные. Все операции — безопасные str_replace/preg_replace.
+	 * Deobfuscation: hXXp → http, [.] → ., [:] → :, [@] → @, [://] → ://, (.) → .
+	 * Order: long composites first, then single tokens. All operations are plain str_replace/preg_replace.
 	 */
 	public static function refang_query( string $q ): string {
 		if ( $q === '' ) {
@@ -26,20 +26,20 @@ final class WSS_Refang {
 	}
 
 	/**
-	 * Нормализация URL для exact-match (ТЗ п.6.2):
+	 * URL normalisation for exact match:
 	 *  - hxxp/[.]/(.) → http/./.;
-	 *  - удаляется фрагмент #…;
-	 *  - https → http (единый scheme);
-	 *  - www удаляется, host — нижний регистр;
-	 *  - trailing slash убирается, пустой path → '/';
-	 *  - UTM и рекламные параметры вырезаются;
-	 *  - порт 80/443 отбрасывается.
+	 *  - the #… fragment is removed;
+	 *  - https → http (single scheme);
+	 *  - www is removed, host is lower-cased;
+	 *  - trailing slash removed, empty path → '/';
+	 *  - UTM and ad parameters are stripped;
+	 *  - ports 80/443 are dropped.
 	 *
-	 * Для ?p=ID и ?page_id=ID сравнение идёт по ID (см. find_exact_post),
-	 * поэтому normalize_url возвращает обычную URL-форму; ID-ветка обрабатывается отдельно.
+	 * For ?p=ID and ?page_id=ID the comparison is by ID (see find_exact_post),
+	 * so normalize_url returns the regular URL form; the ID branch is handled separately.
 	 *
-	 * Путь и slug не приводятся к нижнему регистру (ТЗ п.6.2).
-	 * Пустая строка — если это не URL (нет host).
+	 * Path and slug are not lower-cased.
+	 * Empty string when the value is not a URL (no host).
 	 */
 	public static function normalize_url( string $url ): string {
 		$url = trim( $url );
@@ -47,10 +47,10 @@ final class WSS_Refang {
 			return '';
 		}
 
-		// Refang до parse_url (hxxp не распознаётся wp_parse_url).
+		// Refang before parse_url (hxxp is not recognised by wp_parse_url).
 		$url = self::refang_query( $url );
 
-		// Убираем фрагмент.
+		// Strip the fragment.
 		$hash_pos = strpos( $url, '#' );
 		if ( $hash_pos !== false ) {
 			$url = substr( $url, 0, $hash_pos );
@@ -60,7 +60,7 @@ final class WSS_Refang {
 			return '';
 		}
 
-		// Если схема отсутствует, но строка похожа на домен — добавляем http://.
+		// No scheme but the value looks like a domain — prepend http://.
 		if ( ! preg_match( '#^[a-z][a-z0-9+.-]*://#i', $url ) ) {
 			$first_seg = explode( '/', $url, 2 )[0];
 			if ( strpos( $first_seg, '.' ) !== false && ! preg_match( '/\s/', $first_seg ) ) {
@@ -108,8 +108,8 @@ final class WSS_Refang {
 	}
 
 	/**
-	 * Извлекает числовой ID из URL вида ?p=123 или ?page_id=123.
-	 * Используется для exact-match по ID (ТЗ п.6.2).
+	 * Extracts a numeric ID from ?p=123 or ?page_id=123 URLs.
+	 * Used for exact matching by ID.
 	 */
 	public static function extract_id( string $url ): int {
 		$url = self::refang_query( $url );
@@ -120,8 +120,8 @@ final class WSS_Refang {
 	}
 
 	/**
-	 * Извлекает slug (последний сегмент пути) из URL.
-	 * Возвращает пустую строку, если не удаётся.
+	 * Extracts the slug (last path segment) from a URL.
+	 * Returns an empty string when it cannot.
 	 */
 	public static function extract_slug( string $url ): string {
 		$url = self::refang_query( $url );
