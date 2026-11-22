@@ -398,45 +398,126 @@
 	max-width: 280px;
 }
 
-.wss-api-list {
-	margin: 14px 0 0;
+/* Browser-driven rebuild: buttons, progress bar, status line. */
+.wss-index-actions {
+	margin-top: 16px;
 }
-.wss-api-list dt {
-	font-size: 11px;
+.wss-index-actions .wss-reset-btn {
+	display: inline-block;
+	width: auto;
+	min-width: 220px;
+	margin: 0 8px 0 0;
+}
+.wss-index-runner {
+	margin-top: 14px;
+	padding-top: 14px;
+	border-top: 1px solid #f0f0f1;
+}
+.wss-index-track {
+	height: 8px;
+	margin: 14px 0 8px;
+	background: #eef0f3;
+	border-radius: 99px;
+	overflow: hidden;
+}
+.wss-index-bar {
+	height: 100%;
+	width: 0;
+	background: linear-gradient(90deg, #2271b1, #72aee6);
+	border-radius: 99px;
+	transition: width .3s ease;
+}
+.wss-index-runner .wss-index-line {
+	margin: 0;
+	min-height: 18px;
+	font-size: 12px;
+	color: #646970;
+}
+
+/* Documentation blocks: one <details> per REST method. */
+.wss-doc {
+	margin-top: 12px;
+	padding-top: 12px;
+	border-top: 1px solid #f0f0f1;
+}
+.wss-doc:first-of-type {
+	margin-top: 16px;
+}
+
+.wss-doc > summary {
+	cursor: pointer;
+	font-size: 13px;
+	font-weight: 600;
+	color: #1d2327;
+	list-style: none;
+	user-select: none;
+	padding: 2px 0;
+}
+.wss-doc > summary::-webkit-details-marker {
+	display: none;
+}
+.wss-doc > summary::before {
+	content: '▸';
+	display: inline-block;
+	width: 14px;
+	margin-right: 4px;
+	color: #8c8f94;
+	transition: transform .15s;
+}
+.wss-doc[open] > summary::before {
+	transform: rotate(90deg);
+}
+.wss-doc > summary:hover {
+	color: #2271b1;
+}
+
+.wss-doc-table-wrap {
+	margin: 10px 0 4px;
+	overflow-x: auto;
+}
+
+.wss-doc-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+	line-height: 1.5;
+}
+
+.wss-doc-table th,
+.wss-doc-table td {
+	padding: 6px 10px;
+	border-bottom: 1px solid #f0f0f1;
+	text-align: left;
+	vertical-align: top;
+}
+
+.wss-doc-table thead th {
+	font-size: 10px;
 	text-transform: uppercase;
 	letter-spacing: .5px;
 	color: #8c8f94;
-	font-weight: 600;
-	margin: 12px 0 4px;
-}
-.wss-api-list dt:first-of-type {
-	margin-top: 0;
-}
-.wss-api-list dd {
-	margin: 0;
-	font-size: 13px;
-	color: #50575e;
-	word-break: break-all;
-}
-.wss-api-list dd code {
-	font-size: 12px;
 	background: #f6f7f7;
-	padding: 2px 6px;
-	border-radius: 4px;
-	color: #0a4b78;
+	border-bottom-color: #dcdcde;
+	white-space: nowrap;
 }
 
-.wss-api-method {
-	display: inline-block;
-	margin-left: 6px;
-	padding: 1px 7px;
-	border-radius: 99px;
-	background: #eef6ff;
-	color: #0a4b78;
-	font-size: 10px;
+.wss-doc-table tbody th {
 	font-weight: 600;
-	letter-spacing: .3px;
-	vertical-align: 1px;
+	color: #1d2327;
+	white-space: nowrap;
+}
+
+.wss-doc-table tbody td {
+	color: #50575e;
+}
+
+.wss-doc-table tbody tr:last-child th,
+.wss-doc-table tbody tr:last-child td {
+	border-bottom: 0;
+}
+
+.wss-doc-table code {
+	font-size: 11px;
 }
 
 .wss-api-code {
@@ -1049,24 +1130,52 @@ body.wss-dark-page .wss-panel-text {
 	color: #c9cdd2;
 }
 
-body.wss-dark-page .wss-api-list dt {
-	color: #9ca3af;
+body.wss-dark-page .wss-doc {
+	border-top-color: #353a41;
 }
-body.wss-dark-page .wss-api-list dd {
+body.wss-dark-page .wss-doc > summary {
+	color: #e8ebed;
+}
+body.wss-dark-page .wss-doc > summary:hover {
+	color: #60a5fa;
+}
+body.wss-dark-page .wss-doc-table th,
+body.wss-dark-page .wss-doc-table td {
+	border-bottom-color: #353a41;
+}
+body.wss-dark-page .wss-doc-table thead th {
+	background: #1a1d21;
+	color: #9ca3af;
+	border-bottom-color: #353a41;
+}
+body.wss-dark-page .wss-doc-table tbody th {
+	color: #e8ebed;
+}
+body.wss-dark-page .wss-doc-table tbody td {
 	color: #c9cdd2;
 }
-body.wss-dark-page .wss-api-list dd code {
+body.wss-dark-page .wss-doc-table thead th code,
+body.wss-dark-page .wss-doc-table tbody code {
 	background: #1a1d21;
-	color: #7dd3fc;
-}
-body.wss-dark-page .wss-api-method {
-	background: #1e3a52;
 	color: #7dd3fc;
 }
 body.wss-dark-page .wss-api-code {
 	background: #1a1d21;
 	border-color: #353a41;
 	color: #e8ebed;
+}
+
+body.wss-dark-page .wss-index-runner {
+	border-top-color: #353a41;
+}
+body.wss-dark-page .wss-index-track {
+	background: #2a2f36;
+}
+body.wss-dark-page .wss-index-bar {
+	background: linear-gradient(90deg, #4a9eff, #60a5fa);
+}
+body.wss-dark-page .wss-index-runner .wss-index-line {
+	color: #9ca3af;
 }
 
 body.wss-dark-page .wss-status {

@@ -75,37 +75,49 @@ final class WSS_Index_Backfill {
 		return is_array( $state ) ? array_merge( $defaults, $state ) : $defaults;
 	}
 
-	private static function save_state( array $state ): void {
+	/**
+	 * Stores the job state.
+	 *
+	 * @param array $state Job state.
+	 * @param bool  $flush Drop the cached diagnostics snapshot. Intermediate
+	 *                     batches skip it: the counters are stale for a few
+	 *                     seconds anyway, and the browser-driven rebuild
+	 *                     reads them on every step.
+	 */
+	private static function save_state( array $state, bool $flush = true ): void {
 		update_option( self::OPTION, $state, true );
 
-		// Every state change (start, each batch, finish, clear) can change
-		// what the counters describe, so the cached snapshot goes with it.
-		self::flush_status();
+		if ( $flush ) {
+			self::flush_status();
+		}
 	}
 
 	/**
 	 * Queues a full rebuild. Safe to call repeatedly: an already running
 	 * job is not restarted from zero.
+	 *
+	 * @param bool $schedule Queue a WP-Cron run. False for a rebuild driven
+	 *                       step by step from the browser: the job must not
+	 *                       also run in the background.
 	 */
-	public static function start(): void {
+	public static function start( bool $schedule = true ): void {
 		$option = get_option( self::OPTION, [] );
 		$state  = is_array( $option ) ? $option : [];
 
 		// A job that is still running keeps its cursor; only a finished or
 		// absent one is reset.
 		if ( ! empty( $state['done'] ) || ! isset( $state['cursor'] ) || empty( $state['started'] ) ) {
-			$state = [
+			self::save_state( [
 				'done'      => false,
 				'cursor'    => 0,
 				'processed' => 0,
 				'errors'    => 0,
 				'started'   => time(),
 				'finished'  => 0,
-			];
-			update_option( self::OPTION, $state, true );
+			] );
 		}
 
-		if ( ! wp_next_scheduled( self::HOOK ) ) {
+		if ( $schedule && ! wp_next_scheduled( self::HOOK ) ) {
 			wp_schedule_single_event( time() + self::SCHEDULE_DELAY, self::HOOK );
 		}
 	}
@@ -142,15 +154,17 @@ final class WSS_Index_Backfill {
 	 * ============================================================ */
 
 	/**
-	 * Processes one batch. Scheduled with wp_schedule_single_event() and
-	 * safe to call manually.
+	 * Processes one batch. Scheduled with wp_schedule_single_event(), called
+	 * by the AJAX step endpoint, and safe to call manually.
 	 *
 	 * @param bool $reschedule Queue the next run when this one is not the
 	 *                        last (CLI drives the loop itself).
+	 * @return string 'busy' when another worker holds the lock, 'done' when
+	 *                the job is finished after this call, 'ran' otherwise.
 	 */
-	public function run( bool $reschedule = true ): void {
+	public function run( bool $reschedule = true ): string {
 		if ( get_transient( self::LOCK ) ) {
-			return;
+			return 'busy';
 		}
 		set_transient( self::LOCK, time(), self::LOCK_TTL );
 
@@ -158,7 +172,7 @@ final class WSS_Index_Backfill {
 
 		if ( ! empty( $state['done'] ) ) {
 			delete_transient( self::LOCK );
-			return;
+			return 'done';
 		}
 
 		$batch     = max( 1, (int) apply_filters( 'wss_index_backfill_batch', self::DEFAULT_BATCH ) );
@@ -192,13 +206,18 @@ final class WSS_Index_Backfill {
 			$state['finished'] = time();
 		}
 
-		self::save_state( $state );
+		// Flush the diagnostics snapshot only when the job is over: an
+		// intermediate batch must not turn every browser step into a
+		// COUNT(*) of the whole index.
+		self::save_state( $state, ! empty( $state['done'] ) );
 
 		delete_transient( self::LOCK );
 
 		if ( $reschedule && empty( $state['done'] ) ) {
 			wp_schedule_single_event( time() + self::SCHEDULE_DELAY, self::HOOK );
 		}
+
+		return empty( $state['done'] ) ? 'ran' : 'done';
 	}
 
 	/**

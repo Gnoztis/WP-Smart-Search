@@ -11,6 +11,10 @@ final class WSS_Config {
 	public const REST_NAMESPACE = 'wss/v1';
 	public const PAGE_SLUG      = 'wss-smart-search';
 
+	/** One step of a browser-driven links index rebuild. */
+	public const AJAX_INDEX_STEP  = 'wss_index_step';
+	public const NONCE_INDEX_STEP = 'wss_index_step';
+
 	public const ASSETS_DIR = 'assets';
 	public const CSS_FILE   = 'admin.css';
 	public const JS_FILE    = 'admin.js';

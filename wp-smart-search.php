@@ -2,11 +2,12 @@
 /**
  * Plugin Name: WP Smart Search
  * Description: AJAX-поиск + REST API (Application Password) с индексацией ссылок для дедупликации.
- * Version:     2.4.0
+ * Version:     2.5.0
  * Author:      Gnostis
  * License:     GPL-2.0-or-later
  * Text Domain: wp-smart-search
  * Requires at least: 7.0
+ * Tested up to: 7.1
  * Requires PHP: 8.0
  * Update URI:  https://github.com/Gnoztis/WP-Smart-Search
  */
@@ -15,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WSS_VERSION', '2.4.0' );
+define( 'WSS_VERSION', '2.5.0' );
 define( 'WSS_PLUGIN_FILE', __FILE__ );
 define( 'WSS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 

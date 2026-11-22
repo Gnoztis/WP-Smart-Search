@@ -7,14 +7,74 @@ final class WSS_Ajax_Handler {
 
 	private WSS_Search_Engine $engine;
 	private WSS_Rate_Limiter  $rate_limiter;
+	private WSS_Index_Backfill $backfill;
 
-	public function __construct( WSS_Search_Engine $engine, WSS_Rate_Limiter $rate_limiter ) {
+	public function __construct( WSS_Search_Engine $engine, WSS_Rate_Limiter $rate_limiter, WSS_Index_Backfill $backfill ) {
 		$this->engine       = $engine;
 		$this->rate_limiter = $rate_limiter;
+		$this->backfill     = $backfill;
 	}
 
 	public function register_hooks(): void {
 		add_action( 'wp_ajax_' . WSS_Config::AJAX_ACTION, [ $this, 'handle' ] );
+		add_action( 'wp_ajax_' . WSS_Config::AJAX_INDEX_STEP, [ $this, 'handle_index_step' ] );
+	}
+
+	/**
+	 * One step of a browser-driven rebuild of the links index.
+	 *
+	 * The browser loop (the indexing tab) sends one request per batch so a
+	 * host without a working WP-Cron — or one where a cron batch takes too
+	 * long — still gets visible progress. The step shares WSS_Index_Backfill
+	 * with the cron worker: whoever takes the lock first works, the other
+	 * answers busy.
+	 */
+	public function handle_index_step(): void {
+		nocache_headers();
+
+		if ( ! wp_doing_ajax() ) {
+			wp_send_json_error( [ 'message' => __( 'Некорректный контекст запроса.', 'wp-smart-search' ) ], 400 );
+		}
+
+		$method = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( (string) $_SERVER['REQUEST_METHOD'] ) : '';
+		if ( $method !== 'POST' ) {
+			wp_send_json_error( [ 'message' => __( 'Метод не поддерживается.', 'wp-smart-search' ) ], 405 );
+		}
+
+		check_ajax_referer( WSS_Config::NONCE_INDEX_STEP, WSS_Config::NONCE_FIELD );
+
+		if ( ! WSS_Config::user_can_rebuild() ) {
+			wp_send_json_error( [ 'message' => __( 'Недостаточно прав для переиндексации.', 'wp-smart-search' ) ], 403 );
+		}
+
+		// A finished job is reset, a running one keeps its cursor; no cron
+		// event is queued, the browser drives this run.
+		WSS_Index_Backfill::start( false );
+
+		$result = $this->backfill->run( false );
+		$status = WSS_Index_Backfill::status( true );
+
+		$total     = (int) ( $status['posts'] ?? 0 );
+		$processed = (int) $status['processed'];
+		$percent   = $total > 0 ? (int) min( 100, (int) round( $processed * 100 / $total ) ) : 0;
+
+		$message = '';
+		if ( 'busy' === $result ) {
+			$message = __( 'Фоновая пересборка уже выполняется. Попробуйте позже.', 'wp-smart-search' );
+		} elseif ( ! empty( $status['done'] ) ) {
+			$message = __( 'Готово.', 'wp-smart-search' );
+		}
+
+		wp_send_json_success( [
+			'done'      => ! empty( $status['done'] ),
+			'processed' => $processed,
+			'total'     => $total,
+			'percent'   => $percent,
+			'errors'    => (int) $status['errors'],
+			'busy'      => 'busy' === $result,
+			'links'     => isset( $status['links'] ) ? (int) $status['links'] : null,
+			'message'   => $message,
+		] );
 	}
 
 	public function handle(): void {

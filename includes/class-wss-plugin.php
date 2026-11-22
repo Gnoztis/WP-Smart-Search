@@ -30,7 +30,7 @@ final class WSS_Plugin {
 		$this->links_indexer = new WSS_Links_Indexer();
 		$this->backfill      = new WSS_Index_Backfill( $this->links_indexer );
 		$this->engine        = new WSS_Search_Engine( $this->cache );
-		$this->ajax          = new WSS_Ajax_Handler( $this->engine, $this->rate_limiter );
+		$this->ajax          = new WSS_Ajax_Handler( $this->engine, $this->rate_limiter, $this->backfill );
 		$this->rest          = new WSS_Rest_Controller( $this->engine, $this->rate_limiter );
 		$this->admin         = new WSS_Admin_Page();
 		$this->updater       = new WSS_GitHub_Updater();

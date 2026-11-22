@@ -172,7 +172,7 @@ final class WSS_GitHub_Updater {
 			'author'        => '<a href="https://github.com/Gnoztis">Gnoztis</a>',
 			'homepage'      => 'https://github.com/' . WSS_Config::UPDATER_REPO,
 			'requires'      => $header['requires'],
-			'tested'        => $release['tested'],
+			'tested'        => $this->tested_version( $header['tested'] ),
 			'requires_php'  => $header['requires_php'],
 			'download_link' => $release['package'],
 			'last_updated'  => $release['published_at'],
@@ -513,10 +513,58 @@ final class WSS_GitHub_Updater {
 			'package'      => $package,
 			'body'         => $body,
 			'published_at' => $published_at,
-			'tested'       => $header['requires'],
+			'tested'       => $this->tested_version( $header['tested'] ),
 			'requires'     => $header['requires'],
 			'requires_php' => $header['requires_php'],
 		];
+	}
+
+	/**
+	 * "Tested up to" turned into the value WordPress compares with.
+	 *
+	 * The header holds a branch claim ("7.1"), while the update screen
+	 * compares the stored value with the full running version ("7.1.5"):
+	 * version_compare( $update->tested, $cur_wp_version, '>=' ). A branch
+	 * claim is always lower than a patch release, so a bare "7.1" still
+	 * renders "Compatibility with WordPress 7.1.5: Not tested".
+	 *
+	 * api.wordpress.org resolves this by serving the patch release of the
+	 * declared branch: readmes say "Tested up to: 7.1" and the API answers
+	 * "7.1.5". The same expansion is done here, so the claim covers the
+	 * running patch release of the branch the author declared.
+	 *
+	 * @param string $tested Header value, e.g. "7.1"; empty when absent.
+	 * @return string Empty when the header is absent, otherwise a version.
+	 */
+	private function tested_version( string $tested ): string {
+		$tested = trim( $tested );
+		if ( '' === $tested ) {
+			return '';
+		}
+
+		$running = function_exists( 'wp_get_wp_version' ) ? (string) wp_get_wp_version() : '';
+		if ( '' === $running && isset( $GLOBALS['wp_version'] ) ) {
+			$running = (string) $GLOBALS['wp_version'];
+		}
+		$running = trim( (string) preg_replace( '/-.*/', '', $running ) );
+		if ( '' === $running ) {
+			return $tested;
+		}
+
+		$tested_parts  = explode( '.', $tested );
+		$running_parts = explode( '.', $running );
+
+		// Already as specific as the running version, or more so.
+		if ( count( $tested_parts ) >= count( $running_parts ) ) {
+			return $tested;
+		}
+
+		// Same branch: the claim covers the running patch release as well.
+		if ( array_slice( $running_parts, 0, count( $tested_parts ) ) === $tested_parts ) {
+			return $running;
+		}
+
+		return $tested;
 	}
 
 	/**
@@ -624,9 +672,15 @@ final class WSS_GitHub_Updater {
 	}
 
 	/**
-	 * Requires / Requires PHP from the plugin header.
+	 * Version headers of the plugin file.
 	 *
-	 * @return array{requires:string,requires_php:string}
+	 * `Tested up to` and `Requires at least` are different things: the
+	 * first is the newest WordPress the plugin was checked against, the
+	 * second is the oldest it runs on. Feeding the minimum into `tested`
+	 * makes the update screen show "compatibility: unknown", so they are
+	 * read separately and `tested` stays empty when the header is absent.
+	 *
+	 * @return array{requires:string,requires_php:string,tested:string}
 	 */
 	private function header_data(): array {
 		if ( self::$header === null ) {
@@ -636,6 +690,7 @@ final class WSS_GitHub_Updater {
 					[
 						'Requires at least' => 'Requires at least',
 						'Requires PHP'      => 'Requires PHP',
+						'Tested up to'      => 'Tested up to',
 					],
 					'plugin'
 				)
@@ -644,6 +699,7 @@ final class WSS_GitHub_Updater {
 			self::$header = [
 				'requires'     => isset( $data['Requires at least'] ) ? (string) $data['Requires at least'] : '',
 				'requires_php' => isset( $data['Requires PHP'] ) ? (string) $data['Requires PHP'] : '',
+				'tested'       => isset( $data['Tested up to'] ) ? (string) $data['Tested up to'] : '',
 			];
 		}
 

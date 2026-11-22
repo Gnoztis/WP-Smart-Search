@@ -642,6 +642,137 @@
 		});
 
 		/* ============================================================
+		   Browser indexing
+		   ============================================================ */
+
+		var $indexRunner = $('#wss-index-runner');
+		var $indexStart  = $('#wss-index-start');
+		var $indexStop   = $('#wss-index-stop');
+		var $indexBar    = $('#wss-index-bar');
+		var $indexText   = $('#wss-index-progress-text');
+		var $indexCounts = $('#wss-index-counts');
+		var indexActive  = false;
+		var indexTimer   = null;
+
+		/* The runner only makes sense with JS: reveal it here. */
+		if ($indexRunner.length) {
+			$indexRunner.removeAttr('hidden');
+		}
+
+		function indexPaint(data) {
+			var percent = parseInt(data.percent, 10);
+			if (isNaN(percent)) {
+				percent = 0;
+			}
+			percent = Math.max(0, Math.min(100, percent));
+
+			$indexBar
+				.attr('aria-valuenow', percent)
+				.css('width', percent + '%');
+
+			$indexText.text(
+				WSS.i18n.indexProgress
+					.replace('%1$d', data.processed || 0)
+					.replace('%2$d', data.total || 0)
+					.replace('%3$d', percent)
+			);
+
+			if (data.links !== null && data.links !== undefined && $indexCounts.length) {
+				$indexCounts.text(
+					WSS.i18n.indexCounts
+						.replace('%1$d', data.links)
+						.replace('%2$d', data.total || 0)
+				);
+			}
+		}
+
+		function indexReset() {
+			indexActive = false;
+			if (indexTimer) {
+				clearTimeout(indexTimer);
+				indexTimer = null;
+			}
+			$indexStart.prop('disabled', false);
+			$indexStop.attr('hidden', 'hidden');
+		}
+
+		function indexStopWith(message) {
+			indexReset();
+			$indexText.text(message);
+		}
+
+		function indexStep(isFirst) {
+			if (!indexActive) {
+				return;
+			}
+
+			$.ajax({
+				url:      WSS.ajaxUrl,
+				type:     'POST',
+				dataType: 'json',
+				data: {
+					action: WSS.indexStepAction,
+					nonce:  WSS.indexStepNonce,
+					start:  isFirst ? 1 : 0
+				}
+			}).done(function (res) {
+				if (!indexActive) {
+					return;
+				}
+				if (!res || !res.success) {
+					indexStopWith(extractServerMessage(res) || WSS.i18n.indexError);
+					return;
+				}
+
+				var data = res.data || {};
+				indexPaint(data);
+
+				if (data.busy) {
+					indexStopWith(data.message || WSS.i18n.indexBusy);
+					return;
+				}
+				if (data.done) {
+					indexReset();
+					$indexText.text(data.message || WSS.i18n.indexDone);
+					return;
+				}
+
+				// One request at a time, with a short pause so a small
+				// PHP-FPM pool is not saturated by the loop.
+				indexTimer = setTimeout(function () {
+					indexStep(false);
+				}, 250);
+			}).fail(function (jqXHR, textStatus) {
+				if (textStatus === 'abort' || !indexActive) {
+					return;
+				}
+				// The cursor lives on the server, so the progress is kept:
+				// pressing start again continues from the same batch.
+				indexStopWith(extractServerMessage(jqXHR) || WSS.i18n.indexError);
+			});
+		}
+
+		$indexStart.on('click', function () {
+			if (indexActive) {
+				return;
+			}
+			indexActive = true;
+			$indexStart.prop('disabled', true);
+			$indexStop.removeAttr('hidden');
+			$indexText.text(WSS.i18n.indexRunning);
+			$indexBar.attr('aria-valuenow', 0).css('width', '0%');
+			indexStep(true);
+		});
+
+		$indexStop.on('click', function () {
+			if (!indexActive) {
+				return;
+			}
+			indexReset();
+			$indexText.text(WSS.i18n.indexStopped);
+		});
+
+		/* ============================================================
 		   Events
 		   ============================================================ */
 
