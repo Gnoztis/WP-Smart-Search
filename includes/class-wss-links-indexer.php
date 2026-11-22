@@ -39,6 +39,7 @@ final class WSS_Links_Indexer {
 			domain VARCHAR(255) NOT NULL DEFAULT '',
 			path VARCHAR(2048) NOT NULL DEFAULT '',
 			anchor TEXT NOT NULL,
+			anchor_kind VARCHAR(16) NOT NULL DEFAULT 'unknown',
 			context TEXT NOT NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY  (id),
@@ -47,6 +48,7 @@ final class WSS_Links_Indexer {
 			KEY url_norm_hash (url_norm_hash),
 			KEY host (host),
 			KEY domain (domain),
+			KEY anchor_kind (anchor_kind),
 			UNIQUE KEY post_url (post_id, url_hash)
 		) $charset;";
 
@@ -113,6 +115,21 @@ final class WSS_Links_Indexer {
 				$statuses
 			)
 		);
+	}
+
+	/**
+	 * Posts that have at least one row in the index.
+	 */
+	public static function count_indexed_posts(): int {
+		global $wpdb;
+
+		if ( ! self::table_exists() ) {
+			return 0;
+		}
+
+		$table = self::table();
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+		return (int) $wpdb->get_var( "SELECT COUNT(DISTINCT post_id) FROM {$table}" ); // phpcs:ignore -- a table name cannot be a placeholder.
 	}
 
 	/**
@@ -245,8 +262,8 @@ final class WSS_Links_Indexer {
 			$result = $wpdb->query(
 				$wpdb->prepare(
 					"INSERT INTO {$table}
-						(post_id, url, url_hash, url_norm, url_norm_hash, scheme, host, domain, path, anchor, context, created_at)
-					VALUES (%d, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+						(post_id, url, url_hash, url_norm, url_norm_hash, scheme, host, domain, path, anchor, anchor_kind, context, created_at)
+					VALUES (%d, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 					ON DUPLICATE KEY UPDATE
 						url = VALUES(url),
 						url_norm = VALUES(url_norm),
@@ -256,8 +273,9 @@ final class WSS_Links_Indexer {
 						domain = VALUES(domain),
 						path = VALUES(path),
 						anchor = VALUES(anchor),
+						anchor_kind = VALUES(anchor_kind),
 						context = VALUES(context)",
-					array_merge( array_values( $row ), [ current_time( 'mysql', true ) ] )
+					array_merge( $row['values'], [ current_time( 'mysql', true ) ] )
 				)
 			);
 
@@ -272,7 +290,11 @@ final class WSS_Links_Indexer {
 	/**
 	 * Normalised rows for the links of a post, keyed by url_hash.
 	 *
-	 * @return array<string,array<int,mixed>>
+	 * Row values follow the INSERT column order in reindex():
+	 * post_id, url, url_hash, url_norm, url_norm_hash, scheme, host, domain,
+	 * path, anchor, anchor_kind, context.
+	 *
+	 * @return array<string,array{kind:string,values:array<int,mixed>}>
 	 */
 	private function build_rows( WP_Post $post ): array {
 		$content = (string) $post->post_content;
@@ -291,12 +313,18 @@ final class WSS_Links_Indexer {
 			$raw  = (string) $link['url'];
 			$hash = md5( $raw );
 
-			if ( isset( $rows[ $hash ] ) ) {
+			$parts = wp_parse_url( $raw );
+			if ( ! is_array( $parts ) || empty( $parts['host'] ) ) {
 				continue;
 			}
 
-			$parts = wp_parse_url( $raw );
-			if ( ! is_array( $parts ) || empty( $parts['host'] ) ) {
+			$anchor = (string) $link['anchor'];
+			$kind   = self::anchor_kind( $anchor, $raw );
+
+			// The same URL twice: keep the most useful anchor (phrase over
+			// url over empty) instead of the first occurrence, otherwise a
+			// pasted address can hide the phrase that points at the same page.
+			if ( isset( $rows[ $hash ] ) && self::anchor_rank( $kind ) <= self::anchor_rank( $rows[ $hash ]['kind'] ) ) {
 				continue;
 			}
 
@@ -310,17 +338,21 @@ final class WSS_Links_Indexer {
 			$norm_hash = $norm !== '' ? md5( $norm ) : '';
 
 			$rows[ $hash ] = [
-				(int) $post->ID,
-				$raw,
-				$hash,
-				$norm,
-				$norm_hash,
-				$scheme,
-				$host,
-				$domain,
-				$path,
-				(string) $link['anchor'],
-				(string) $link['context'],
+				'kind'   => $kind,
+				'values' => [
+					(int) $post->ID,
+					$raw,
+					$hash,
+					$norm,
+					$norm_hash,
+					$scheme,
+					$host,
+					$domain,
+					$path,
+					$anchor,
+					$kind,
+					(string) $link['context'],
+				],
 			];
 		}
 
@@ -346,8 +378,11 @@ final class WSS_Links_Indexer {
 			return [];
 		}
 
+		// Opening tags only: a nested <a> (broken markup in old posts) used to
+		// be swallowed by the outer link, so the inner URL never reached the
+		// index. The anchor text is read up to the first </a> after each one.
 		if ( ! preg_match_all(
-			'/<a\b[^>]*?\bhref\s*=\s*(["\'])(.+?)\1[^>]*>(.*?)<\/a>/is',
+			'/<a\b[^>]*?\bhref\s*=\s*(["\'])(.+?)\1[^>]*>/is',
 			$html,
 			$matches,
 			PREG_OFFSET_CAPTURE
@@ -368,7 +403,13 @@ final class WSS_Links_Indexer {
 				continue; // absolute URLs only
 			}
 
-			$anchor_html = (string) ( $matches[3][ $i ][0] ?? '' );
+			$offset = (int) ( $matches[0][ $i ][1] ?? 0 );
+			$length = strlen( (string) ( $matches[0][ $i ][0] ?? '' ) );
+
+			$rest        = substr( $html, $offset + $length );
+			$close       = stripos( $rest, '</a>' );
+			$anchor_html = ( false === $close ) ? '' : substr( $rest, 0, $close );
+
 			$anchor = trim( wp_strip_all_tags( $anchor_html ) );
 			$anchor = html_entity_decode( $anchor, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 			$anchor = trim( preg_replace( '/\s+/u', ' ', $anchor ) );
@@ -376,8 +417,6 @@ final class WSS_Links_Indexer {
 				$anchor = mb_substr( $anchor, 0, WSS_Config::LINK_ANCHOR_MAX );
 			}
 
-			$offset = (int) ( $matches[0][ $i ][1] ?? 0 );
-			$length = strlen( (string) ( $matches[0][ $i ][0] ?? '' ) );
 			$before = max( 0, $offset - WSS_Config::LINK_CONTEXT_CHARS );
 			$after  = min( $len, $offset + $length + WSS_Config::LINK_CONTEXT_CHARS );
 			$raw_ctx = substr( $html, $before, $after - $before );
@@ -403,6 +442,92 @@ final class WSS_Links_Indexer {
 		}
 
 		return $out;
+	}
+
+	/* ============================================================
+	 *  Anchor kind
+	 * ============================================================ */
+
+	/**
+	 * Kind of anchor text: phrase, url or empty.
+	 *
+	 * Old posts often use the address itself as the anchor
+	 * (`<a href="https://x/y">https://x/y</a>`). Such a link is indexed like
+	 * any other — the kind only makes it findable (anchor_kind=url) and lets a
+	 * report tell a real phrase from a pasted address.
+	 *
+	 * @param string $anchor Anchor text as stored.
+	 * @param string $url    Target URL of the link.
+	 */
+	public static function anchor_kind( string $anchor, string $url ): string {
+		$anchor = trim( $anchor );
+
+		if ( $anchor === '' ) {
+			return 'empty';
+		}
+
+		if ( ! self::looks_like_url( $anchor ) ) {
+			return 'phrase';
+		}
+
+		$anchor_norm = self::url_for_compare( $anchor );
+		$url_norm    = self::url_for_compare( $url );
+
+		if ( $anchor_norm === '' || $url_norm === '' ) {
+			return 'phrase';
+		}
+
+		if ( $anchor_norm === $url_norm
+			|| strpos( $url_norm, $anchor_norm ) === 0
+			|| strpos( $anchor_norm, $url_norm ) === 0 ) {
+			return 'url';
+		}
+
+		return 'phrase';
+	}
+
+	/**
+	 * Whether the value looks like an address rather than a phrase.
+	 */
+	private static function looks_like_url( string $value ): bool {
+		$value = trim( $value );
+
+		if ( $value === '' ) {
+			return false;
+		}
+
+		if ( preg_match( '#^[a-z][a-z0-9+.-]*://#i', $value ) ) {
+			return true;
+		}
+
+		// Bare host, optionally with a path: "pwn.ai/upload2shell".
+		return (bool) preg_match( '#^[a-z0-9.-]+\.[a-z]{2,}(/|$)#i', $value );
+	}
+
+	/**
+	 * Comparison form of a URL or an address-like anchor.
+	 */
+	private static function url_for_compare( string $value ): string {
+		$value = strtolower( trim( $value ) );
+		$value = (string) preg_replace( '#^[a-z][a-z0-9+.-]*://#i', '', $value );
+		$value = (string) preg_replace( '/^www\./i', '', $value );
+		$value = (string) preg_replace( '#/+#', '/', $value );
+
+		return rtrim( $value, '/' );
+	}
+
+	/**
+	 * Preference of an anchor kind when the same URL is linked twice.
+	 */
+	private static function anchor_rank( string $kind ): int {
+		switch ( $kind ) {
+			case 'phrase':
+				return 2;
+			case 'url':
+				return 1;
+			default:
+				return 0;
+		}
 	}
 
 	/* ============================================================

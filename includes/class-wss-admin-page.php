@@ -100,6 +100,8 @@ final class WSS_Admin_Page {
 				'action'          => WSS_Config::AJAX_ACTION,
 				'indexStepAction' => WSS_Config::AJAX_INDEX_STEP,
 				'indexStepNonce'  => wp_create_nonce( WSS_Config::NONCE_INDEX_STEP ),
+				'indexStopAction' => WSS_Config::AJAX_INDEX_STOP,
+				'indexStopNonce'  => wp_create_nonce( WSS_Config::NONCE_INDEX_STOP ),
 				'minLen'          => WSS_Config::MIN_LEN,
 				'initialQuery'    => $this->initial_query(),
 				'pageUrl'         => admin_url( 'edit.php?page=' . WSS_Config::PAGE_SLUG ),
@@ -124,12 +126,12 @@ final class WSS_Admin_Page {
 					'emptyState'    => __( 'Введите запрос для поиска по записям и тегам', 'wp-smart-search' ),
 					'indexRunning'   => __( 'Переиндексация…', 'wp-smart-search' ),
 					'indexProgress'  => __( 'Обработано %1$d из %2$d (%3$d%)', 'wp-smart-search' ),
-					'indexObserving' => __( 'Идёт фоновая пересборка, показываем прогресс: %1$d из %2$d (%3$d%)', 'wp-smart-search' ),
 					'indexDone'      => __( 'Готово.', 'wp-smart-search' ),
 					'indexStopped'   => __( 'Остановлено. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
-					'indexBusyStuck' => __( 'Фоновая пересборка не двигается уже 5 минут. Прогресс и курсор сохранены — она продолжится позже либо запустите доиндексацию снова.', 'wp-smart-search' ),
+					'indexRestart'   => __( 'Начать пересборку с нуля? Текущий прогресс будет потерян.', 'wp-smart-search' ),
+					'indexRetry'     => __( 'Нет ответа от сервера, повторяем…', 'wp-smart-search' ),
 					'indexError'     => __( 'Ошибка запроса. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
-					'indexCounts'    => __( 'Ссылок в индексе: %1$d, записей: %2$d', 'wp-smart-search' ),
+					'indexCounts'    => __( 'Ссылок в индексе: %1$d, записей: %2$d из %3$d', 'wp-smart-search' ),
 				],
 			];
 
@@ -260,6 +262,8 @@ final class WSS_Admin_Page {
 		$endpoint_search = rest_url( WSS_Config::REST_NAMESPACE . '/search' );
 		$endpoint_batch  = rest_url( WSS_Config::REST_NAMESPACE . '/links/batch' );
 		$endpoint_me     = rest_url( WSS_Config::REST_NAMESPACE . '/me' );
+		$endpoint_index  = rest_url( WSS_Config::REST_NAMESPACE . '/index' );
+		$endpoint_rebuild = rest_url( WSS_Config::REST_NAMESPACE . '/index/rebuild' );
 
 		// Rendered with implode() so the block starts exactly at the first
 		// command: any indentation in the template would become part of the
@@ -397,9 +401,11 @@ final class WSS_Admin_Page {
 					<?php
 					$this->render_api_panel(
 						[
-							'search' => $endpoint_search,
-							'batch'  => $endpoint_batch,
-							'me'     => $endpoint_me,
+							'search'  => $endpoint_search,
+							'batch'   => $endpoint_batch,
+							'me'      => $endpoint_me,
+							'index'   => $endpoint_index,
+							'rebuild' => $endpoint_rebuild,
 						]
 					);
 					?>
@@ -407,28 +413,54 @@ final class WSS_Admin_Page {
 			</section>
 
 			<section class="wss-panel" id="wss-panel-index" role="tabpanel" aria-labelledby="wss-tab-index" <?php echo esc_attr( 'index' === $active ? '' : 'hidden' ); ?>>
-				<?php $index_status = WSS_Index_Backfill::status(); ?>
+				<?php $index_status = WSS_Index_Backfill::report(); ?>
 				<div class="wss-panel-card">
 					<h2 class="wss-panel-title"><?php esc_html_e( 'Индекс ссылок', 'wp-smart-search' ); ?></h2>
+
+					<?php if ( 'ready' !== $index_status['state'] ) : ?>
+						<div class="wss-index-alert<?php echo esc_attr( 'empty' === $index_status['state'] ? ' wss-index-alert-critical' : '' ); ?>" role="alert">
+							<p class="wss-index-alert-title">
+								<?php
+								echo esc_html(
+									'empty' === $index_status['state']
+										? __( 'Индекс пуст: поиск по ссылкам ничего не найдёт.', 'wp-smart-search' )
+										: __( 'Индекс неполный: поиск по ссылкам даёт неполную картину.', 'wp-smart-search' )
+								);
+								?>
+							</p>
+							<p class="wss-index-alert-text">
+								<?php
+								echo esc_html(
+									sprintf(
+										/* translators: 1: indexed posts, 2: total posts, 3: state */
+										__( 'Проиндексировано %1$d из %2$d записей (состояние: %3$s). Пока индекс не готов, аудит ссылок бессмыслен: «ничего не найдено» не значит «ссылок нет».', 'wp-smart-search' ),
+										(int) $index_status['posts_indexed'],
+										(int) $index_status['posts_total'],
+										(string) $index_status['state']
+									)
+								);
+								?>
+							</p>
+						</div>
+					<?php endif; ?>
 
 					<?php if ( isset( $_GET['wss_reindex'] ) ) : ?>
 						<p class="wss-index-note"><?php esc_html_e( 'Переиндексация запущена в фоне.', 'wp-smart-search' ); ?></p>
 					<?php endif; ?>
 
-					<?php if ( isset( $index_status['links'] ) ) : ?>
-						<p class="wss-index-line" id="wss-index-counts">
-							<?php
-							echo esc_html(
-								sprintf(
-									/* translators: 1: number of indexed links, 2: number of posts */
-									__( 'Ссылок в индексе: %1$d, записей: %2$d', 'wp-smart-search' ),
-									(int) $index_status['links'],
-									(int) $index_status['posts']
-								)
-							);
-							?>
-						</p>
-					<?php endif; ?>
+					<p class="wss-index-line" id="wss-index-counts">
+						<?php
+						echo esc_html(
+							sprintf(
+								/* translators: 1: number of indexed links, 2: indexed posts, 3: total posts */
+								__( 'Ссылок в индексе: %1$d, записей: %2$d из %3$d', 'wp-smart-search' ),
+								(int) $index_status['links_total'],
+								(int) $index_status['posts_indexed'],
+								(int) $index_status['posts_total']
+							)
+						);
+						?>
+					</p>
 
 					<?php if ( ! $index_status['table'] ) : ?>
 						<p class="wss-index-note"><?php esc_html_e( 'Таблица индекса отсутствует — она будет создана автоматически.', 'wp-smart-search' ); ?></p>
@@ -458,6 +490,7 @@ final class WSS_Admin_Page {
 
 							<div class="wss-index-runner" id="wss-index-runner" hidden>
 								<button type="button" id="wss-index-start" class="wss-reset-btn"><?php esc_html_e( 'Доиндексировать из браузера', 'wp-smart-search' ); ?></button>
+								<button type="button" id="wss-index-restart" class="wss-reset-btn"><?php esc_html_e( 'Начать заново', 'wp-smart-search' ); ?></button>
 								<button type="button" id="wss-index-stop" class="wss-reset-btn" hidden><?php esc_html_e( 'Остановить', 'wp-smart-search' ); ?></button>
 
 								<div class="wss-index-track">
@@ -486,10 +519,22 @@ final class WSS_Admin_Page {
 	/**
 	 * API tab: one source of data for every method, rendered here.
 	 *
-	 * @param array{search:string,batch:string,me:string} $endpoints Absolute URLs from rest_url().
+	 * @param array{search:string,batch:string,me:string,index:string,rebuild:string} $endpoints Absolute URLs from rest_url().
 	 */
 	private function render_api_panel( array $endpoints ): void {
 		$json_flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
+
+		$rebuild_json = (string) wp_json_encode(
+			[
+				'accepted'    => true,
+				'queued'      => true,
+				'state'       => 'partial',
+				'posts_total' => 1200,
+				'processed'   => 0,
+				'last_run'    => 0,
+			],
+			$json_flags
+		);
 
 		$search_curl = 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \\' . "\n"
 			. '  "' . $endpoints['search'] . '?q=wordpress&per_page=10&scope=posts"';
@@ -673,6 +718,31 @@ final class WSS_Admin_Page {
 
 			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример ответа (сокращённо)', 'wp-smart-search' ); ?></p>
 			<pre class="wss-api-code"><code><?php echo esc_html( $me_json ); ?></code></pre>
+		</details>
+
+		<details class="wss-doc">
+			<summary><?php esc_html_e( 'GET /index и POST /index/rebuild — здоровье индекса', 'wp-smart-search' ); ?></summary>
+
+			<p class="wss-api-line"><code>GET <?php echo esc_html( $endpoints['index'] ); ?></code></p>
+			<p class="wss-api-line"><code>POST <?php echo esc_html( $endpoints['rebuild'] ); ?></code></p>
+
+			<p class="wss-panel-text">
+				<?php esc_html_e( 'Оба метода доступны только администратору (manage_options). Пока state не ready, поиск по ссылкам отвечает «ничего не найдено» на любой запрос — это не значит, что ссылок нет: сначала переиндексируйте.', 'wp-smart-search' ); ?>
+			</p>
+
+			<?php
+			$this->render_doc_table(
+				[
+					__( 'Поле', 'wp-smart-search' ),
+					__( 'Значение', 'wp-smart-search' ),
+					__( 'Что означает', 'wp-smart-search' ),
+				],
+				$this->index_field_docs()
+			);
+			?>
+
+			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример ответа /index/rebuild', 'wp-smart-search' ); ?></p>
+			<pre class="wss-api-code"><code><?php echo esc_html( $rebuild_json ); ?></code></pre>
 		</details>
 
 		<details class="wss-doc">
@@ -893,8 +963,30 @@ final class WSS_Admin_Page {
 			[
 				'anchor',
 				'string',
-				__( 'подстрока', 'wp-smart-search' ),
-				__( 'Для scope=links: подстрока в тексте анкора.', 'wp-smart-search' ),
+				__( 'фраза (по умолчанию) или URL', 'wp-smart-search' ),
+				__( 'Для scope=links: текст анкора. По умолчанию ищется по словам с морфологией (см. anchor_match).', 'wp-smart-search' ),
+			],
+			[
+				'anchor_match',
+				'string',
+				implode( ', ', WSS_Config::ANCHOR_MATCH_MODES ) . __( ' (по умолчанию words)', 'wp-smart-search' ),
+				__( 'words — по словам с морфологией (ghostscript находит «Ghostscript 10.05», но не «ghostscripting»); exact — полное совпадение строки; substring — прежнее поведение (LIKE %…%).', 'wp-smart-search' ),
+			],
+			[
+				'anchor_kind',
+				'string|array',
+				implode( ', ', WSS_Config::ANCHOR_KINDS ),
+				__( 'Тип анкора: phrase — фраза, url — адрес вместо текста, empty — пустой, unknown — старая строка до переиндексации. Можно списком.', 'wp-smart-search' ),
+			],
+			[
+				'post_id',
+				'integer|array',
+				sprintf(
+					/* translators: %d: maximum number of ids */
+					__( 'до %d ID', 'wp-smart-search' ),
+					(int) WSS_Config::MAX_POST_ID_FILTER
+				),
+				__( 'Для scope=links: все ссылки указанных записей. Удалённая запись даёт пустой результат, а не 400.', 'wp-smart-search' ),
 			],
 			[
 				'fields',
@@ -1010,6 +1102,25 @@ final class WSS_Admin_Page {
 	}
 
 	/**
+	 * Response fields of GET /index.
+	 *
+	 * @return array<int,array{0:string,1:string,2:string}>
+	 */
+	private function index_field_docs(): array {
+		return [
+			[ 'state', 'ready | empty | partial | stale', __( 'empty — записей в базе больше нуля, а индекс пуст; partial — пересборка не завершена или охват меньше 90%; stale — индекс собран старой версией формата (например, до anchor_kind); ready — можно доверять.', 'wp-smart-search' ) ],
+			[ 'needs_rebuild', 'boolean', __( 'То же, что state != ready: сначала переиндексация, потом аудит.', 'wp-smart-search' ) ],
+			[ 'posts_total', 'integer', __( 'Сколько записей подлежит индексации.', 'wp-smart-search' ) ],
+			[ 'posts_indexed', 'integer', __( 'Сколько записей реально есть в индексе.', 'wp-smart-search' ) ],
+			[ 'links_total', 'integer', __( 'Сколько ссылок в индексе.', 'wp-smart-search' ) ],
+			[ 'generation', 'integer', __( 'Поколение кэша: растёт при каждом сохранении записи.', 'wp-smart-search' ) ],
+			[ 'index_version', 'string', __( 'Версия формата строк индекса, которой завершилась последняя полная пересборка.', 'wp-smart-search' ) ],
+			[ 'done, cursor, processed, errors', 'integer | boolean', __( 'Состояние фоновой задачи пересборки.', 'wp-smart-search' ) ],
+			[ 'last_run', 'integer', __( 'Unix-время последнего завершённого (или начатого) прогона.', 'wp-smart-search' ) ],
+		];
+	}
+
+	/**
 	 * Error codes of the REST namespace.
 	 *
 	 * @return array<int,array{0:string,1:string,2:string}>
@@ -1018,11 +1129,13 @@ final class WSS_Admin_Page {
 		return [
 			[ 'wss_unauthorized', '401', __( 'Нет заголовка Authorization (или он пуст).', 'wp-smart-search' ) ],
 			[ 'wss_invalid_credentials', '401', __( 'Неверный Application Password или пользователь.', 'wp-smart-search' ) ],
-			[ 'wss_forbidden', '403', __( 'У пользователя нет права publish_posts.', 'wp-smart-search' ) ],
+			[ 'wss_forbidden', '403', __( 'Нет права publish_posts, либо для /index нет manage_options.', 'wp-smart-search' ) ],
 			[ 'wss_rate_limited', '429', __( 'Превышен лимит запросов; смотрите Retry-After.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_statuses', '400', __( 'Статус не входит в allowed_statuses.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_fields', '400', __( 'Неизвестное поле в fields или не строка в списке.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_post_type', '400', __( 'post_type не зарегистрирован.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_anchor_match', '400', __( 'anchor_match не из words, exact, substring.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_anchor_kind', '400', __( 'anchor_kind не из phrase, url, empty, unknown.', 'wp-smart-search' ) ],
 			[ 'wss_empty', '400', __( 'Пустой q при поиске по записям.', 'wp-smart-search' ) ],
 			[ 'wss_too_short', '400', __( 'q короче минимальной длины и нет фильтра по ссылке.', 'wp-smart-search' ) ],
 			[ 'wss_empty_batch', '400', __( 'В batch не передано ни одного значения.', 'wp-smart-search' ) ],

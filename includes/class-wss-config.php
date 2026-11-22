@@ -15,6 +15,10 @@ final class WSS_Config {
 	public const AJAX_INDEX_STEP  = 'wss_index_step';
 	public const NONCE_INDEX_STEP = 'wss_index_step';
 
+	/** Releases the browser marker so WP-Cron may run again. */
+	public const AJAX_INDEX_STOP  = 'wss_index_stop';
+	public const NONCE_INDEX_STOP = 'wss_index_stop';
+
 	public const ASSETS_DIR = 'assets';
 	public const CSS_FILE   = 'admin.css';
 	public const JS_FILE    = 'admin.js';
@@ -53,12 +57,21 @@ final class WSS_Config {
 	 * ============================================================ */
 
 	public const LINK_FIELDS = [
-		'post_id', 'title', 'permalink', 'status', 'url', 'host',
-		'domain', 'anchor', 'context', 'match_type',
+		'post_id', 'title', 'permalink', 'status', 'post_type', 'url',
+		'host', 'domain', 'anchor', 'anchor_kind', 'context', 'match_type',
 	];
 
 	/** Always returned, even when `fields` does not list them. */
 	public const LINK_FIELDS_REQUIRED = [ 'post_id', 'match_type' ];
+
+	/** Anchor matching modes of `anchor_match`. */
+	public const ANCHOR_MATCH_MODES = [ 'words', 'exact', 'substring' ];
+
+	/** Kinds of anchor text: phrase, the URL itself, empty, or not yet computed. */
+	public const ANCHOR_KINDS = [ 'phrase', 'url', 'empty', 'unknown' ];
+
+	/** Max post ids in the `post_id` link filter. */
+	public const MAX_POST_ID_FILTER = 100;
 
 	/** Max lookups per batch call. */
 	public const BATCH_MAX = 50;
@@ -117,7 +130,14 @@ final class WSS_Config {
 
 	public const LINKS_TABLE            = 'wss_links';
 	public const LINKS_TABLE_VER_OPTION = 'wss_links_table_ver';
-	public const LINKS_TABLE_VER        = 'v1';
+	/** v2: added the anchor_kind column. */
+	public const LINKS_TABLE_VER        = 'v2';
+
+	/**
+	 * Version of the row format produced by the indexer. A rebuild stamps it
+	 * into the job state; an index built by an older format reports "stale".
+	 */
+	public const LINKS_INDEX_VERSION = 'v2';
 
 	/** When the table existence was last verified (autoloaded option). */
 	public const LINKS_TABLE_CHECK_OPTION = 'wss_links_table_check';

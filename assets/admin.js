@@ -645,27 +645,29 @@
 		   Browser indexing
 		   ============================================================ */
 
-		var $indexRunner = $('#wss-index-runner');
-		var $indexStart  = $('#wss-index-start');
-		var $indexStop   = $('#wss-index-stop');
-		var $indexBar    = $('#wss-index-bar');
-		var $indexText   = $('#wss-index-progress-text');
-		var $indexCounts = $('#wss-index-counts');
-		var indexActive  = false;
-		var indexTimer   = null;
+		var $indexRunner  = $('#wss-index-runner');
+		var $indexStart   = $('#wss-index-start');
+		var $indexRestart = $('#wss-index-restart');
+		var $indexStop    = $('#wss-index-stop');
+		var $indexBar     = $('#wss-index-bar');
+		var $indexText    = $('#wss-index-progress-text');
+		var $indexCounts  = $('#wss-index-counts');
+		var indexActive   = false;
+		var indexTimer    = null;
+		var indexRetries  = 0;
 
-		/* While another worker holds the lock the loop only watches it. If the
-		   lock never clears, the background job is stuck: stop after 5 min. */
-		var indexBusySince = 0;
-		var INDEX_BUSY_GIVEUP = 5 * 60 * 1000;
-		var INDEX_RETRY_DEFAULT = 2000;
+		/* One request at a time, a short pause between batches so a small
+		   PHP-FPM pool is not saturated by the loop. */
+		var INDEX_PAUSE   = 200;
+		var INDEX_RETRY   = 2000;
+		var INDEX_MAX_RETRY = 2;
 
 		/* The runner only makes sense with JS: reveal it here. */
 		if ($indexRunner.length) {
 			$indexRunner.removeAttr('hidden');
 		}
 
-		function indexPaint(data, observing) {
+		function indexPaint(data) {
 			var percent = parseInt(data.percent, 10);
 			if (isNaN(percent)) {
 				percent = 0;
@@ -676,67 +678,55 @@
 				.attr('aria-valuenow', percent)
 				.css('width', percent + '%');
 
-			var template = observing ? WSS.i18n.indexObserving : WSS.i18n.indexProgress;
-
 			$indexText.text(
-				template
+				WSS.i18n.indexProgress
 					.replace('%1$d', data.processed || 0)
 					.replace('%2$d', data.total || 0)
 					.replace('%3$d', percent)
 			);
 
-			if (data.links !== null && data.links !== undefined && $indexCounts.length) {
+			if ($indexCounts.length && typeof data.links === 'number') {
 				$indexCounts.text(
 					WSS.i18n.indexCounts
 						.replace('%1$d', data.links)
-						.replace('%2$d', data.total || 0)
+						.replace('%2$d', data.processed || 0)
+						.replace('%3$d', data.total || 0)
 				);
 			}
 		}
 
 		function indexReset() {
 			indexActive = false;
-			indexBusySince = 0;
+			indexRetries = 0;
 			if (indexTimer) {
 				clearTimeout(indexTimer);
 				indexTimer = null;
 			}
 			$indexStart.prop('disabled', false);
+			$indexRestart.prop('disabled', false);
 			$indexStop.attr('hidden', 'hidden');
 		}
 
 		function indexStopWith(message) {
 			indexReset();
 			$indexText.text(message);
+			indexRelease();
 		}
 
-		function indexRetryAfter(data) {
-			var retry = parseInt(data.retry_after, 10);
-			if (isNaN(retry) || retry < 1) {
-				return INDEX_RETRY_DEFAULT;
-			}
-			return Math.min(30, retry) * 1000;
+		/* Frees WP-Cron again; the cursor stays, so a restart continues. */
+		function indexRelease() {
+			$.ajax({
+				url:      WSS.ajaxUrl,
+				type:     'POST',
+				dataType: 'json',
+				data: {
+					action: WSS.indexStopAction,
+					nonce:  WSS.indexStopNonce
+				}
+			});
 		}
 
-		/* Observation mode: another worker is rebuilding, show its progress. */
-		function indexObserve(data) {
-			if (!indexBusySince) {
-				indexBusySince = Date.now();
-			}
-
-			indexPaint(data, true);
-
-			if (Date.now() - indexBusySince > INDEX_BUSY_GIVEUP) {
-				indexStopWith(WSS.i18n.indexBusyStuck);
-				return;
-			}
-
-			indexTimer = setTimeout(function () {
-				indexStep(false);
-			}, indexRetryAfter(data));
-		}
-
-		function indexStep(isFirst) {
+		function indexStep(isFirst, isRestart) {
 			if (!indexActive) {
 				return;
 			}
@@ -746,30 +736,24 @@
 				type:     'POST',
 				dataType: 'json',
 				data: {
-					action: WSS.indexStepAction,
-					nonce:  WSS.indexStepNonce,
-					start:  isFirst ? 1 : 0
+					action:  WSS.indexStepAction,
+					nonce:   WSS.indexStepNonce,
+					start:   isFirst ? 1 : 0,
+					restart: isRestart ? 1 : 0
 				}
 			}).done(function (res) {
 				if (!indexActive) {
 					return;
 				}
+				indexRetries = 0;
+
 				if (!res || !res.success) {
 					indexStopWith(extractServerMessage(res) || WSS.i18n.indexError);
 					return;
 				}
 
 				var data = res.data || {};
-
-				// Busy is a normal answer: someone else is working, so keep
-				// watching instead of stopping with an error.
-				if (data.busy) {
-					indexObserve(data);
-					return;
-				}
-
-				indexBusySince = 0;
-				indexPaint(data, false);
+				indexPaint(data);
 
 				if (data.done) {
 					indexReset();
@@ -777,31 +761,55 @@
 					return;
 				}
 
-				// One request at a time, with a short pause so a small
-				// PHP-FPM pool is not saturated by the loop.
 				indexTimer = setTimeout(function () {
-					indexStep(false);
-				}, 250);
+					indexStep(false, false);
+				}, INDEX_PAUSE);
 			}).fail(function (jqXHR, textStatus) {
 				if (textStatus === 'abort' || !indexActive) {
 					return;
 				}
-				// The cursor lives on the server, so the progress is kept:
-				// pressing start again continues from the same batch.
+
+				/* A dropped request must not lose the run: retry twice, then
+				   stop keeping the progress (the cursor is on the server). */
+				indexRetries++;
+				if (indexRetries <= INDEX_MAX_RETRY) {
+					$indexText.text(WSS.i18n.indexRetry);
+					indexTimer = setTimeout(function () {
+						indexStep(false, false);
+					}, INDEX_RETRY);
+					return;
+				}
+
 				indexStopWith(extractServerMessage(jqXHR) || WSS.i18n.indexError);
 			});
 		}
 
-		$indexStart.on('click', function () {
+		function indexRun(isRestart) {
 			if (indexActive) {
 				return;
 			}
-			indexActive = true;
+			indexActive  = true;
+			indexRetries = 0;
 			$indexStart.prop('disabled', true);
+			$indexRestart.prop('disabled', true);
 			$indexStop.removeAttr('hidden');
 			$indexText.text(WSS.i18n.indexRunning);
 			$indexBar.attr('aria-valuenow', 0).css('width', '0%');
-			indexStep(true);
+			indexStep(true, isRestart);
+		}
+
+		$indexStart.on('click', function () {
+			indexRun(false);
+		});
+
+		$indexRestart.on('click', function () {
+			if (indexActive) {
+				return;
+			}
+			if (window.confirm && !window.confirm(WSS.i18n.indexRestart)) {
+				return;
+			}
+			indexRun(true);
 		});
 
 		$indexStop.on('click', function () {
@@ -810,8 +818,8 @@
 			}
 			indexReset();
 			$indexText.text(WSS.i18n.indexStopped);
+			indexRelease();
 		});
-
 		/* ============================================================
 		   Events
 		   ============================================================ */

@@ -52,6 +52,46 @@ final class WSS_Rest_Controller {
 			'callback'            => [ $this, 'handle_me' ],
 			'permission_callback' => [ $this, 'permission_check' ],
 		] );
+
+		// Index health: a link audit is meaningless while the index is
+		// empty or stale, so consumers need to ask before trusting results.
+		register_rest_route( WSS_Config::REST_NAMESPACE, '/index', [
+			'methods'             => [ 'GET' ],
+			'callback'            => [ $this, 'handle_index_status' ],
+			'permission_callback' => [ $this, 'permission_check_admin' ],
+		] );
+
+		register_rest_route( WSS_Config::REST_NAMESPACE, '/index/rebuild', [
+			'methods'             => [ 'POST' ],
+			'callback'            => [ $this, 'handle_index_rebuild' ],
+			'permission_callback' => [ $this, 'permission_check_admin' ],
+		] );
+	}
+
+	/**
+	 * Administrator gate for the index endpoints.
+	 *
+	 * The Authorization header and the search capability are already
+	 * enforced for every wss route; these two are stricter.
+	 *
+	 * @param mixed $request
+	 * @return true|WP_Error
+	 */
+	public function permission_check_admin( $request ) {
+		$basic = $this->permission_check( $request );
+		if ( is_wp_error( $basic ) ) {
+			return $basic;
+		}
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return new WP_Error(
+				'wss_forbidden',
+				__( 'Недостаточно прав: диагностика индекса доступна администратору.', 'wp-smart-search' ),
+				[ 'status' => 403 ]
+			);
+		}
+
+		return true;
 	}
 
 	/* ============================================================
@@ -497,6 +537,18 @@ final class WSS_Rest_Controller {
 				'type'              => 'string',
 				'sanitize_callback' => 'sanitize_text_field',
 			],
+			'anchor_match' => [
+				'description'       => __( 'Семантика anchor: words (по словам, по умолчанию), exact или substring.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'enum'              => WSS_Config::ANCHOR_MATCH_MODES,
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'anchor_kind' => [
+				'description' => __( 'Тип анкора: phrase, url, empty, unknown (можно списком).', 'wp-smart-search' ),
+			],
+			'post_id'    => [
+				'description' => __( 'ID записи или массив ID: вернуть все ссылки этих записей.', 'wp-smart-search' ),
+			],
 			'fields'     => [
 				'description' => sprintf(
 					/* translators: 1: available fields, 2: required fields */
@@ -550,6 +602,15 @@ final class WSS_Rest_Controller {
 			'statuses'   => [
 				'description' => __( 'Массив статусов или строка через запятую.', 'wp-smart-search' ),
 			],
+			'anchor_match' => [
+				'description'       => __( 'Семантика anchors: words (по словам, по умолчанию), exact или substring.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'enum'              => WSS_Config::ANCHOR_MATCH_MODES,
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'anchor_kind' => [
+				'description' => __( 'Тип анкора: phrase, url, empty, unknown (можно списком).', 'wp-smart-search' ),
+			],
 			'fields'     => [
 				'description' => __( 'Список полей links.items через запятую.', 'wp-smart-search' ),
 			],
@@ -587,16 +648,22 @@ final class WSS_Rest_Controller {
 		$host_p   = (string) ( $request->get_param( 'host' )   ?? '' );
 		$anchor_p = (string) ( $request->get_param( 'anchor' ) ?? '' );
 
-		$has_link_filter = ( $url_p !== '' || $domain_p !== '' || $host_p !== '' || $anchor_p !== '' );
+		$post_id_p     = $request->get_param( 'post_id' );
+		$anchor_kind_p = $request->get_param( 'anchor_kind' );
+
+		$has_link_filter = ( $url_p !== '' || $domain_p !== '' || $host_p !== '' || $anchor_p !== '' )
+			|| ! empty( $post_id_p )
+			|| ! empty( $anchor_kind_p );
 
 		if ( $scope === 'links' && $q_str === '' && $has_link_filter ) {
-			// q is derived by the engine from url/domain/host/anchor.
+			// q is derived by the engine from url/domain/host/anchor. post_id
+			// and anchor_kind need no q at all.
 			$q_str = $url_p !== '' ? $url_p
 				: ( $domain_p !== '' ? $domain_p
 				: ( $host_p !== '' ? $host_p : $anchor_p ) );
 		}
 
-		if ( $q_str === '' ) {
+		if ( $q_str === '' && ! $has_link_filter ) {
 			return new WP_Error( 'wss_empty', __( 'Параметр q не может быть пустым.', 'wp-smart-search' ), [ 'status' => 400 ] );
 		}
 
@@ -633,6 +700,9 @@ final class WSS_Rest_Controller {
 			'domain'     => $domain_p,
 			'host'       => $host_p,
 			'anchor'     => $anchor_p,
+			'anchor_match' => (string) ( $request->get_param( 'anchor_match' ) ?? 'words' ),
+			'anchor_kind'  => $anchor_kind_p,
+			'post_id'    => $post_id_p,
 			'fields'     => $request->get_param( 'fields' ),
 			'exact_total' => $request->get_param( 'exact_total' ),
 		];
@@ -714,10 +784,12 @@ final class WSS_Rest_Controller {
 		}
 
 		$input = [
-			'per_page'  => $request->get_param( 'per_page' ),
-			'post_type' => (string) ( $request->get_param( 'post_type' ) ?? 'post' ),
-			'statuses'  => ( $request->get_param( 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES ),
-			'fields'    => $request->get_param( 'fields' ),
+			'per_page'     => $request->get_param( 'per_page' ),
+			'post_type'    => (string) ( $request->get_param( 'post_type' ) ?? 'post' ),
+			'statuses'     => $request->get_param( 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES,
+			'fields'       => $request->get_param( 'fields' ),
+			'anchor_match' => (string) ( $request->get_param( 'anchor_match' ) ?? 'words' ),
+			'anchor_kind'  => $request->get_param( 'anchor_kind' ),
 		];
 
 		$result = $this->engine->do_links_batch( $lookups, $input, true );
@@ -729,6 +801,37 @@ final class WSS_Rest_Controller {
 		$result['meta']['requested'] = $total;
 
 		return new WP_REST_Response( $result, 200 );
+	}
+
+	/**
+	 * GET /wss/v1/index — read-only index health.
+	 *
+	 * A link audit must call this first: an empty or stale index answers
+	 * "nothing found" for every query, which is not the same as "no links".
+	 */
+	public function handle_index_status( WP_REST_Request $request ) {
+		return new WP_REST_Response( WSS_Index_Backfill::report(), 200 );
+	}
+
+	/**
+	 * POST /wss/v1/index/rebuild — queue the background rebuild and answer.
+	 *
+	 * The job runs in WP-Cron; the request only schedules it, so it never
+	 * blocks on a long rebuild.
+	 */
+	public function handle_index_rebuild( WP_REST_Request $request ) {
+		WSS_Index_Backfill::start();
+
+		$report = WSS_Index_Backfill::report();
+
+		return new WP_REST_Response( [
+			'accepted'    => true,
+			'queued'      => true,
+			'state'       => $report['state'],
+			'posts_total' => $report['posts_total'],
+			'processed'   => $report['processed'],
+			'last_run'    => $report['last_run'],
+		], 202 );
 	}
 
 	public function handle_me( WP_REST_Request $request ) {
@@ -772,7 +875,7 @@ final class WSS_Rest_Controller {
 			'cache_backend'        => WSS_Cache::backend(),
 			// Links index health: an empty index with existing posts means
 			// the data was lost and a rebuild is queued.
-			'index'                => WSS_Index_Backfill::status(),
+			'index'                => WSS_Index_Backfill::report(),
 			'match_modes'          => WSS_Config::MATCH_MODES,
 			'scopes'               => WSS_Config::SCOPES,
 		], 200 );

@@ -41,9 +41,21 @@ final class WSS_Search_Engine {
 		$page = isset( $input['page'] ) ? absint( $input['page'] ) : 1;
 		$page = max( 1, $page );
 
+		// A link query may have no words at all: "all links of these posts"
+		// (post_id) and "links of a kind" (anchor_kind) are complete queries.
+		$has_link_selector = ( null !== $this->post_id_filter( $input['post_id'] ?? null ) )
+			|| ( null !== $this->anchor_kind_filter( $input['anchor_kind'] ?? null, false ) );
+
 		$parsed = $this->parse_query( $raw );
 		if ( is_wp_error( $parsed ) ) {
-			return $parsed;
+			if ( WSS_Config::SCOPE_POSTS === $scope || ! $has_link_selector ) {
+				return $parsed;
+			}
+			$parsed = [
+				'words'   => [],
+				'tokens'  => 0,
+				'dropped' => 0,
+			];
 		}
 
 		$words = $parsed['words'];
@@ -51,7 +63,7 @@ final class WSS_Search_Engine {
 		// The stem, not the whole word: "sandboxes" and "sandbox" must
 		// find each other.
 		$terms = WSS_Morphology::terms( $words );
-		if ( empty( $terms ) ) {
+		if ( empty( $terms ) && ! ( WSS_Config::SCOPE_POSTS !== $scope && $has_link_selector ) ) {
 			return new WP_Error( 'invalid', __( 'Не удалось разобрать запрос.', 'wp-smart-search' ) );
 		}
 
@@ -79,7 +91,7 @@ final class WSS_Search_Engine {
 			],
 		];
 
-		if ( $scope !== WSS_Config::SCOPE_LINKS ) {
+		if ( WSS_Config::SCOPE_LINKS !== $scope && ! empty( $terms ) ) {
 			$payload['type']  = $type;
 			$payload['match'] = $match;
 
@@ -105,6 +117,16 @@ final class WSS_Search_Engine {
 				return $links;
 			}
 			$payload['links'] = $links;
+
+			// Link filters (post_id, anchor_mode, anchor kinds) are part of
+			// the answer's meta: the client must see what was actually asked.
+			if ( isset( $links['meta'] ) && is_array( $links['meta'] ) ) {
+				foreach ( $links['meta'] as $key => $value ) {
+					if ( ( is_array( $value ) && ! empty( $value ) ) || ( is_string( $value ) && $value !== '' ) ) {
+						$payload['meta'][ $key ] = $value;
+					}
+				}
+			}
 		}
 
 		return $payload;
@@ -1263,10 +1285,20 @@ final class WSS_Search_Engine {
 
 		/* ---------- Link-level filters ---------- */
 
-		$match_type = 'all';
+		$match_type     = 'all';
+		$anchor_patterns = [];
+		$anchor_terms    = [];
 
-		if ( isset( $input['url'] ) && $input['url'] !== '' ) {
-			$norm = WSS_Refang::normalize_url( (string) $input['url'] );
+		$url_p    = isset( $input['url'] ) && $input['url'] !== '' ? (string) $input['url'] : '';
+		$domain_p = isset( $input['domain'] ) && $input['domain'] !== '' ? (string) $input['domain'] : '';
+		$host_p   = isset( $input['host'] ) && $input['host'] !== '' ? (string) $input['host'] : '';
+		$anchor_p = isset( $input['anchor'] ) && $input['anchor'] !== '' ? (string) $input['anchor'] : '';
+
+		// Links of specific posts: an audit checks one post at a time.
+		$post_ids = $this->post_id_filter( $input['post_id'] ?? null );
+
+		if ( $url_p !== '' ) {
+			$norm = WSS_Refang::normalize_url( $url_p );
 			if ( $norm !== '' ) {
 				$where[]    = 'l.url_norm_hash = %s';
 				$params[]   = md5( $norm );
@@ -1274,8 +1306,8 @@ final class WSS_Search_Engine {
 			}
 		}
 
-		if ( isset( $input['domain'] ) && $input['domain'] !== '' ) {
-			$d = WSS_Links_Indexer::registrable_domain( (string) $input['domain'] );
+		if ( $domain_p !== '' ) {
+			$d = WSS_Links_Indexer::registrable_domain( $domain_p );
 			if ( $d !== '' ) {
 				$where[]  = 'l.domain = %s';
 				$params[] = $d;
@@ -1285,8 +1317,8 @@ final class WSS_Search_Engine {
 			}
 		}
 
-		if ( $match_type === 'all' && isset( $input['host'] ) && $input['host'] !== '' ) {
-			$h = strtolower( preg_replace( '/^www\./i', '', trim( (string) $input['host'] ) ) );
+		if ( $match_type === 'all' && $host_p !== '' ) {
+			$h = strtolower( preg_replace( '/^www\./i', '', trim( $host_p ) ) );
 			if ( $h !== '' ) {
 				$where[]    = 'l.host = %s';
 				$params[]   = $h;
@@ -1294,16 +1326,89 @@ final class WSS_Search_Engine {
 			}
 		}
 
-		if ( isset( $input['anchor'] ) && $input['anchor'] !== '' ) {
-			$where[]  = 'l.anchor LIKE %s';
-			$params[] = '%' . $wpdb->esc_like( (string) $input['anchor'] ) . '%';
-			if ( $match_type === 'all' ) {
-				$match_type = 'anchor';
+		if ( $anchor_p !== '' ) {
+			$anchor_match = isset( $input['anchor_match'] ) ? sanitize_key( (string) $input['anchor_match'] ) : 'words';
+			if ( ! in_array( $anchor_match, WSS_Config::ANCHOR_MATCH_MODES, true ) ) {
+				return new WP_Error(
+					'wss_invalid_anchor_match',
+					sprintf(
+						/* translators: %s: allowed anchor matching modes */
+						__( 'Недопустимый anchor_match. Разрешены: %s.', 'wp-smart-search' ),
+						implode( ', ', WSS_Config::ANCHOR_MATCH_MODES )
+					),
+					[ 'status' => 400 ]
+				);
+			}
+
+			if ( 'substring' === $anchor_match ) {
+				$where[]  = 'l.anchor LIKE %s';
+				$params[] = '%' . $wpdb->esc_like( $anchor_p ) . '%';
+				if ( $match_type === 'all' ) {
+					$match_type = 'anchor_substring';
+				}
+			} elseif ( 'exact' === $anchor_match ) {
+				$where[]  = 'l.anchor = %s';
+				$params[] = $anchor_p;
+				if ( $match_type === 'all' ) {
+					$match_type = 'anchor_exact';
+				}
+			} else {
+				// Words with morphology: a broad LIKE prefilter, the final
+				// decision is the whole-word regex below.
+				$anchor_words = preg_split( '/\s+/u', $anchor_p, -1, PREG_SPLIT_NO_EMPTY );
+				$anchor_words = is_array( $anchor_words ) ? array_slice( $anchor_words, 0, WSS_Config::MAX_WORDS ) : [];
+				$anchor_terms = WSS_Morphology::terms( $anchor_words );
+
+				foreach ( $anchor_terms as $anchor_term ) {
+					$where[]  = 'l.anchor LIKE %s';
+					$params[] = '%' . $wpdb->esc_like( $anchor_term ) . '%';
+				}
+				foreach ( $anchor_terms as $anchor_term ) {
+					$anchor_patterns[] = WSS_Morphology::word_pattern( $anchor_term );
+				}
+				if ( $match_type === 'all' ) {
+					$match_type = 'anchor_words';
+				}
 			}
 		}
 
-		// Fallback: q → domain or anchor.
-		if ( $match_type === 'all' ) {
+		// Single post filter: all links of the given posts. An empty list
+		// (all ids were zero or the cap dropped everything) is an empty
+		// result, not an error: audits walk a list and hit deleted posts.
+		$no_match = false;
+		if ( null !== $post_ids ) {
+			if ( empty( $post_ids ) ) {
+				$no_match = true;
+			} else {
+				$ph      = implode( ',', array_fill( 0, count( $post_ids ), '%d' ) );
+				$where[] = "l.post_id IN ($ph)";
+				foreach ( $post_ids as $pid ) {
+					$params[] = $pid;
+				}
+				if ( $match_type === 'all' ) {
+					$match_type = 'post_id';
+				}
+			}
+		}
+
+		// Anchor kind filter: phrase | url | empty | unknown.
+		$anchor_kind_filter = $this->anchor_kind_filter( $input['anchor_kind'] ?? null, $is_api );
+		if ( is_wp_error( $anchor_kind_filter ) ) {
+			return $anchor_kind_filter;
+		}
+		if ( null !== $anchor_kind_filter && ! empty( $anchor_kind_filter ) ) {
+			$ph      = implode( ',', array_fill( 0, count( $anchor_kind_filter ), '%s' ) );
+			$where[] = "l.anchor_kind IN ($ph)";
+			foreach ( $anchor_kind_filter as $kind ) {
+				$params[] = $kind;
+			}
+			if ( $match_type === 'all' ) {
+				$match_type = 'anchor_kind';
+			}
+		}
+
+		/* ---------- fallback q → domain or anchor ---------- */
+		if ( $match_type === 'all' && null === $post_ids && null === $anchor_kind_filter ) {
 			$q = (string) ( $filters['query'] ?? '' );
 			if ( $q !== '' ) {
 				$norm = WSS_Refang::normalize_url( $q );
@@ -1322,7 +1427,7 @@ final class WSS_Search_Engine {
 				} else {
 					$where[]    = 'l.anchor LIKE %s';
 					$params[]   = '%' . $wpdb->esc_like( $q ) . '%';
-					$match_type = 'anchor';
+					$match_type = 'anchor_substring';
 				}
 			}
 		}
@@ -1341,15 +1446,21 @@ final class WSS_Search_Engine {
 		}
 
 		// No link filter applied (for example an invalid URL came from
-		// batch). Returning every link would be meaningless and
-		// expensive, so answer with an empty result.
-		if ( $match_type === 'all' ) {
+		// batch), or every requested post id was unusable: an empty answer
+		// is the honest one.
+		if ( $match_type === 'all' || $no_match ) {
 			return [
 				'items'       => [],
 				'total_exact' => $exact_total,
 				'page'        => $page,
 				'per_page'    => $per_page,
 				'has_more'    => false,
+				'meta'        => [
+					'post_id'      => null === $post_ids ? [] : $post_ids,
+					'anchor_match' => $anchor_p !== '' ? ( $anchor_match ?? 'words' ) : '',
+					'anchor_terms' => $anchor_terms,
+					'anchor_kind'  => null === $anchor_kind_filter ? [] : $anchor_kind_filter,
+				],
 			];
 		}
 
@@ -1377,7 +1488,8 @@ final class WSS_Search_Engine {
 		$limit = $exact_total ? $per_page : ( $per_page + 1 );
 
 		$sql = "SELECT l.id, l.post_id, l.url, l.url_norm, l.host, l.domain,
-					l.anchor, l.context, p.post_title, p.post_status
+					l.anchor, l.anchor_kind, l.context, p.post_title, p.post_status,
+					p.post_type
 			FROM $table l
 			INNER JOIN {$wpdb->posts} p ON p.ID = l.post_id
 			WHERE $where_sql
@@ -1389,22 +1501,33 @@ final class WSS_Search_Engine {
 		$rows = $wpdb->get_results( $wpdb->prepare( $sql, $params_page ) );
 
 		$items = [];
+		$dropped = 0;
 		if ( is_array( $rows ) ) {
 			foreach ( $rows as $row ) {
-				$post_id   = (int) $row->post_id;
+				$post_id = (int) $row->post_id;
+
+				// Words mode: the LIKE prefilter is broader than a word
+				// match, so the regex makes the final decision here.
+				if ( ! empty( $anchor_patterns ) && ! $this->matches_all_words( (string) $row->anchor, $anchor_patterns ) ) {
+					$dropped++;
+					continue;
+				}
+
 				$permalink = (string) get_permalink( $post_id );
 
 				$items[] = [
-					'post_id'    => $post_id,
-					'title'      => $row->post_title !== '' ? $row->post_title : __( '(без названия)', 'wp-smart-search' ),
-					'permalink'  => $permalink,
-					'status'     => (string) $row->post_status,
-					'url'        => (string) $row->url,
-					'host'       => (string) $row->host,
-					'domain'     => (string) $row->domain,
-					'anchor'     => (string) $row->anchor,
-					'context'    => (string) $row->context,
-					'match_type' => $match_type,
+					'post_id'     => $post_id,
+					'title'       => $row->post_title !== '' ? $row->post_title : __( '(без названия)', 'wp-smart-search' ),
+					'permalink'   => $permalink,
+					'status'      => (string) $row->post_status,
+					'post_type'   => (string) $row->post_type,
+					'url'         => (string) $row->url,
+					'host'        => (string) $row->host,
+					'domain'      => (string) $row->domain,
+					'anchor'      => (string) $row->anchor,
+					'anchor_kind' => (string) $row->anchor_kind,
+					'context'     => (string) $row->context,
+					'match_type'  => $match_type,
 				];
 			}
 		}
@@ -1430,12 +1553,24 @@ final class WSS_Search_Engine {
 			unset( $item );
 		}
 
+		// The word regex rejected rows the LIKE prefilter let through, so the
+		// SQL total is an upper bound; subtract them for a closer number.
+		if ( $dropped > 0 && $exact_total ) {
+			$total = max( 0, $total - $dropped );
+		}
+
 		$out = [
 			'items'       => array_values( $items ),
-			'total_exact' => $exact_total,
+			'total_exact' => $exact_total && empty( $anchor_patterns ),
 			'page'        => $page,
 			'per_page'    => $per_page,
 			'has_more'    => (bool) $has_more,
+			'meta'        => [
+				'post_id'      => null === $post_ids ? [] : $post_ids,
+				'anchor_match' => $anchor_p !== '' ? ( $anchor_match ?? 'words' ) : '',
+				'anchor_terms' => $anchor_terms,
+				'anchor_kind'  => null === $anchor_kind_filter ? [] : $anchor_kind_filter,
+			],
 		];
 
 		if ( $exact_total ) {
@@ -1446,6 +1581,89 @@ final class WSS_Search_Engine {
 		}
 
 		return $out;
+	}
+
+	/**
+	 * Normalised post_id filter: null when absent, a list of ids otherwise.
+	 *
+	 * An empty list means "nothing can match" (no usable ids) and must not be
+	 * confused with "no filter".
+	 *
+	 * @param mixed $value Scalar, comma separated string or array.
+	 * @return int[]|null
+	 */
+	private function post_id_filter( $value ) {
+		if ( null === $value || '' === $value || [] === $value ) {
+			return null;
+		}
+
+		$raw = is_array( $value ) ? $value : [ $value ];
+		$ids = [];
+
+		foreach ( $raw as $id ) {
+			if ( is_array( $id ) ) {
+				continue;
+			}
+			$id = absint( $id );
+			if ( $id > 0 ) {
+				$ids[] = $id;
+			}
+		}
+
+		$ids = array_values( array_unique( $ids ) );
+
+		if ( count( $ids ) > WSS_Config::MAX_POST_ID_FILTER ) {
+			$ids = array_slice( $ids, 0, WSS_Config::MAX_POST_ID_FILTER );
+		}
+
+		return $ids;
+	}
+
+	/**
+	 * Normalised anchor_kind filter: null when absent.
+	 *
+	 * @param mixed $value Scalar, comma separated string or array.
+	 * @return string[]|null|WP_Error
+	 */
+	private function anchor_kind_filter( $value, bool $is_api ) {
+		if ( null === $value || '' === $value || [] === $value ) {
+			return null;
+		}
+
+		$raw = is_array( $value ) ? $value : explode( ',', (string) $value );
+		$kinds = [];
+		$invalid = [];
+
+		foreach ( $raw as $kind ) {
+			if ( ! is_scalar( $kind ) ) {
+				$invalid[] = '?';
+				continue;
+			}
+			$kind = sanitize_key( (string) $kind );
+			if ( $kind === '' ) {
+				continue;
+			}
+			if ( in_array( $kind, WSS_Config::ANCHOR_KINDS, true ) ) {
+				$kinds[] = $kind;
+			} else {
+				$invalid[] = $kind;
+			}
+		}
+
+		if ( ! empty( $invalid ) && $is_api ) {
+			return new WP_Error(
+				'wss_invalid_anchor_kind',
+				sprintf(
+					/* translators: 1: given kinds, 2: allowed kinds */
+					__( 'Недопустимый anchor_kind: %1$s. Разрешены: %2$s.', 'wp-smart-search' ),
+					implode( ', ', array_unique( $invalid ) ),
+					implode( ', ', WSS_Config::ANCHOR_KINDS )
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
+		return array_values( array_unique( $kinds ) );
 	}
 
 	/**

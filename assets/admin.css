@@ -408,6 +408,34 @@
 	min-width: 220px;
 	margin: 0 8px 0 0;
 }
+
+/* Index health warning: "nothing found" while the index is empty is not
+   the same as "no links". */
+.wss-index-alert {
+	margin: 0 0 16px;
+	padding: 14px 16px;
+	border: 1px solid #f0c33c;
+	border-left: 4px solid #dba617;
+	border-radius: 10px;
+	background: #fcf9e8;
+}
+.wss-index-alert-critical {
+	border-color: #f0b7b7;
+	border-left-color: #d63638;
+	background: #fcf0f1;
+}
+.wss-index-alert-title {
+	margin: 0 0 6px;
+	font-size: 13px;
+	font-weight: 600;
+	color: #1d2327;
+}
+.wss-index-alert-text {
+	margin: 0;
+	font-size: 12px;
+	line-height: 1.55;
+	color: #50575e;
+}
 .wss-index-runner {
 	margin-top: 14px;
 	padding-top: 14px;
@@ -1196,6 +1224,22 @@ body.wss-dark-page .wss-cli {
 
 body.wss-dark-page .wss-index-runner {
 	border-top-color: #353a41;
+}
+body.wss-dark-page .wss-index-alert {
+	border-color: #4a3f1e;
+	border-left-color: #dba617;
+	background: #2c2a1c;
+}
+body.wss-dark-page .wss-index-alert-critical {
+	border-color: #4a2224;
+	border-left-color: #d63638;
+	background: #2c1c1e;
+}
+body.wss-dark-page .wss-index-alert-title {
+	color: #e8ebed;
+}
+body.wss-dark-page .wss-index-alert-text {
+	color: #c9cdd2;
 }
 body.wss-dark-page .wss-index-track {
 	background: #2a2f36;

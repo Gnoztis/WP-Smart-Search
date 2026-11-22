@@ -93,6 +93,27 @@ final class WSS_Morphology {
 	}
 
 	/**
+	 * Whole-word pattern for an anchor term.
+	 *
+	 * pattern() matches a stem prefix (the q behaviour), which would make
+	 * "ghostscript" match "ghostscripting". An anchor is a phrase, so the
+	 * term must be a whole word here. Cyrillic stems may carry a case ending
+	 * (the stemmer strips up to four letters, e.g. "уязвим" + "ость"), so up
+	 * to four Cyrillic letters are allowed after the stem.
+	 */
+	public static function word_pattern( string $term ): string {
+		$term = mb_strtolower( trim( $term ), 'UTF-8' );
+		if ( $term === '' ) {
+			return '/$^/u';
+		}
+
+		$quoted = preg_quote( $term, '/' );
+		$tail   = preg_match( '/[\p{Cyrillic}]/u', $term ) ? '[\p{Cyrillic}]{0,4}' : '';
+
+		return '/(?<![\p{L}\p{N}_])' . $quoted . $tail . '(?![\p{L}\p{N}_])/iu';
+	}
+
+	/**
 	 * Normalised query terms without duplicates (order preserved).
 	 *
 	 * @param string[] $words

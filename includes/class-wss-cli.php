@@ -30,23 +30,34 @@ final class WSS_Cli {
 	public function status( $args = [], $assoc_args = [] ): void {
 		// WP-CLI has no user, so the administrator-only counters are asked
 		// for explicitly.
-		$status = WSS_Index_Backfill::status( true );
+		$report = WSS_Index_Backfill::report();
 
 		\WP_CLI\Utils\format_items(
 			'table',
 			[
-				[ 'field' => 'table', 'value' => $status['table'] ? 'ok' : 'MISSING' ],
-				[ 'field' => 'links', 'value' => $status['links'] ],
-				[ 'field' => 'posts', 'value' => $status['posts'] ],
-				[ 'field' => 'backfill_done', 'value' => $status['done'] ? 'yes' : 'no' ],
-				[ 'field' => 'cursor', 'value' => $status['cursor'] ],
-				[ 'field' => 'processed', 'value' => $status['processed'] ],
-				[ 'field' => 'errors', 'value' => $status['errors'] ],
+				[ 'field' => 'state', 'value' => $report['state'] ],
+				[ 'field' => 'table', 'value' => $report['table'] ? 'ok' : 'MISSING' ],
+				[ 'field' => 'links', 'value' => $report['links_total'] ],
+				[ 'field' => 'posts_indexed', 'value' => $report['posts_indexed'] . ' / ' . $report['posts_total'] ],
+				[ 'field' => 'index_version', 'value' => $report['index_version'] !== '' ? $report['index_version'] : '-' ],
+				[ 'field' => 'backfill_done', 'value' => $report['done'] ? 'yes' : 'no' ],
+				[ 'field' => 'cursor', 'value' => $report['cursor'] ],
+				[ 'field' => 'processed', 'value' => $report['processed'] ],
+				[ 'field' => 'errors', 'value' => $report['errors'] ],
 			],
 			[ 'field', 'value' ]
 		);
 
-		if ( ! $status['done'] ) {
+		if ( 'ready' !== $report['state'] ) {
+			\WP_CLI::warning(
+				sprintf(
+					'Index state is "%s": a link search answers "nothing found" for every query until a rebuild completes. Run: wp wss index rebuild',
+					$report['state']
+				)
+			);
+		}
+
+		if ( ! $report['done'] ) {
 			\WP_CLI::warning( 'A background rebuild is in progress; this command restarts it synchronously from the beginning (indexing is idempotent).' );
 		}
 	}
@@ -94,16 +105,34 @@ final class WSS_Cli {
 
 		$started = microtime( true );
 		$result  = $this->backfill->rebuild_sync( $batch, $ticker );
+		$report  = WSS_Index_Backfill::report();
 
-		\WP_CLI::success(
+		\WP_CLI::log(
 			sprintf(
-				'Indexed %d posts in %.1fs, errors: %d, links: %d.',
+				'Indexed %d posts in %.1fs, errors: %d, links: %d, state: %s.',
 				$result['processed'],
 				microtime( true ) - $started,
 				$result['errors'],
-				WSS_Links_Indexer::count_rows()
+				$report['links_total'],
+				$report['state']
 			)
 		);
+
+		// Scripts must be able to see a failed run: a non-zero exit code is
+		// the only signal they reliably check.
+		if ( $result['errors'] > 0 ) {
+			\WP_CLI::error(
+				sprintf(
+					'Rebuild finished with %d error(s); see the log above. State: %s.',
+					$result['errors'],
+					$report['state']
+				),
+				false
+			);
+			\WP_CLI::halt( 1 );
+		}
+
+		\WP_CLI::success( sprintf( 'Links index rebuilt, state: %s.', $report['state'] ) );
 	}
 
 	/**
