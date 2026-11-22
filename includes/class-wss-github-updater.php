@@ -25,7 +25,32 @@ final class WSS_GitHub_Updater {
 		add_filter( 'upgrader_source_selection',             [ $this, 'rename_source' ], 10, 4 );
 		add_action( 'upgrader_process_complete',             [ $this, 'after_upgrade' ], 10, 2 );
 		add_action( 'load-plugins.php',                      [ $this, 'maybe_force_check' ] );
-		add_filter( 'plugin_action_links_' . WSS_Config::UPDATER_BASENAME, [ $this, 'action_links' ] );
+		add_filter( 'plugin_action_links_' . self::basename(), [ $this, 'action_links' ] );
+	}
+
+	/**
+	 * Basename of the installed main plugin file, e.g.
+	 * "wp-smart-search/wp-smart-search.php".
+	 *
+	 * Computed at runtime, never taken from a constant: the folder is
+	 * whatever the site has. A GitHub zipball unpacks into
+	 * Gnoztis-WP-Smart-Search-<sha>, a manual upload can use any name.
+	 * WordPress keys update_plugins->response by this basename and counts
+	 * every entry for the admin badge, but lists only entries whose key
+	 * matches a file from get_plugins() — so a hard-coded key shows an
+	 * "update available" badge with an empty update list.
+	 */
+	public static function basename(): string {
+		$basename = plugin_basename( WSS_PLUGIN_FILE );
+
+		if ( $basename === '' ) {
+			// plugin_basename() returns the path relative to the plugin
+			// directory; an empty result means the main file was not inside
+			// it, so fall back to the documented layout.
+			$basename = WSS_Config::UPDATER_SLUG . '/' . wp_basename( WSS_PLUGIN_FILE );
+		}
+
+		return $basename;
 	}
 
 	/* ============================================================
@@ -47,6 +72,13 @@ final class WSS_GitHub_Updater {
 			$transient->response = [];
 		}
 
+		$basename = self::basename();
+
+		// Runs before the early returns: a dangling entry is a leftover of
+		// the previous key and must disappear even when GitHub is
+		// unreachable right now.
+		$this->purge_stale_entries( $transient, $basename );
+
 		$release = $this->get_release();
 		if ( $release === null ) {
 			return $transient;
@@ -56,10 +88,10 @@ final class WSS_GitHub_Updater {
 			return $transient;
 		}
 
-		$transient->response[ WSS_Config::UPDATER_BASENAME ] = (object) [
-			'id'            => WSS_Config::UPDATER_BASENAME,
+		$transient->response[ $basename ] = (object) [
+			'id'            => $basename,
 			'slug'          => WSS_Config::UPDATER_SLUG,
-			'plugin'        => WSS_Config::UPDATER_BASENAME,
+			'plugin'        => $basename,
 			'new_version'   => $release['version'],
 			'url'           => 'https://github.com/' . WSS_Config::UPDATER_REPO,
 			'package'       => $release['package'],
@@ -72,10 +104,42 @@ final class WSS_GitHub_Updater {
 		];
 
 		if ( isset( $transient->no_update ) && is_array( $transient->no_update ) ) {
-			unset( $transient->no_update[ WSS_Config::UPDATER_BASENAME ] );
+			unset( $transient->no_update[ $basename ] );
 		}
 
 		return $transient;
+	}
+
+	/**
+	 * Drops update entries that point at our main file under a foreign key.
+	 *
+	 * Such entries are leftovers of the hard-coded basename this class used
+	 * before, or of a folder that was renamed. They make the admin badge
+	 * count an update that get_plugin_updates() cannot list, because the
+	 * key does not match any installed plugin file.
+	 *
+	 * @param mixed  $transient
+	 * @param string $basename Our real basename, kept as is.
+	 */
+	private function purge_stale_entries( $transient, string $basename ): void {
+		$main = wp_basename( WSS_PLUGIN_FILE );
+
+		foreach ( [ 'response', 'no_update' ] as $bucket ) {
+			if ( ! isset( $transient->$bucket ) || ! is_array( $transient->$bucket ) ) {
+				continue;
+			}
+
+			foreach ( $transient->$bucket as $key => $entry ) {
+				if ( (string) $key === $basename || ! is_object( $entry ) ) {
+					continue;
+				}
+				if ( empty( $entry->plugin ) || wp_basename( (string) $entry->plugin ) !== $main ) {
+					continue;
+				}
+
+				unset( $transient->$bucket[ $key ] );
+			}
+		}
 	}
 
 	/**
@@ -121,8 +185,9 @@ final class WSS_GitHub_Updater {
 
 	/**
 	 * GitHub archives unpack into a directory like
-	 * Gnoztis-WP-Smart-Search-1a2b3c4 — rename it to the plugin slug,
-	 * otherwise WordPress updates the wrong directory.
+	 * Gnoztis-WP-Smart-Search-1a2b3c4 — rename it to the directory the site
+	 * actually uses (the folder of the installed main file), otherwise
+	 * WordPress updates the wrong directory or adds a second copy.
 	 *
 	 * @param string $source
 	 * @param string $remote_source
@@ -137,17 +202,28 @@ final class WSS_GitHub_Updater {
 		if ( ! is_array( $hook_extra ) || empty( $hook_extra['plugin'] ) ) {
 			return $source;
 		}
-		if ( WSS_Config::UPDATER_BASENAME !== $hook_extra['plugin'] ) {
+		if ( self::basename() !== (string) $hook_extra['plugin'] ) {
 			return $source;
 		}
 		if ( ! is_dir( $source ) ) {
 			return $source;
 		}
-		if ( ! is_file( trailingslashit( $source ) . 'wp-smart-search.php' ) ) {
+		if ( ! is_file( trailingslashit( $source ) . wp_basename( WSS_PLUGIN_FILE ) ) ) {
 			return $source;
 		}
 
-		$desired = trailingslashit( $remote_source ) . WSS_Config::UPDATER_SLUG;
+		// Rename the unpacked directory to the folder the site actually
+		// uses, not to the slug: the update has to replace the installed
+		// directory, otherwise WordPress ends up with two copies of the
+		// plugin (one of them inactive).
+		$folder = dirname( self::basename() );
+		if ( $folder === '.' || $folder === '' ) {
+			// The main file sits directly in the plugins directory, so
+			// there is no directory to rename.
+			return $source;
+		}
+
+		$desired = trailingslashit( $remote_source ) . $folder;
 		if ( untrailingslashit( $source ) === untrailingslashit( $desired ) ) {
 			return $source;
 		}
@@ -174,11 +250,72 @@ final class WSS_GitHub_Updater {
 	 */
 	public function after_upgrade( $upgrader = null, $hook_extra = [] ): void {
 		if ( is_array( $hook_extra ) && ! empty( $hook_extra['plugins'] ) && is_array( $hook_extra['plugins'] ) ) {
-			if ( ! in_array( WSS_Config::UPDATER_BASENAME, $hook_extra['plugins'], true ) ) {
+			if ( ! in_array( self::basename(), $hook_extra['plugins'], true ) ) {
 				return;
 			}
 		}
 		$this->flush();
+	}
+
+	/**
+	 * Update state for the /me diagnostics.
+	 *
+	 * Answers "why does the admin show an update badge with nothing to
+	 * update?" in one request: the real basename, and the entry the
+	 * update_plugins transient holds for our main file — including the key
+	 * it sits under, which is where a mismatch shows up.
+	 *
+	 * @return array{plugin_basename:string,transient_entry:bool,transient_key:string,new_version:string,package:string}
+	 */
+	public static function diagnostic(): array {
+		$basename = self::basename();
+
+		$out = [
+			'plugin_basename' => $basename,
+			'transient_entry' => false,
+			'transient_key'   => '',
+			'new_version'     => '',
+			'package'         => '',
+		];
+
+		$transient = get_site_transient( 'update_plugins' );
+		if ( ! is_object( $transient ) || ! isset( $transient->response ) || ! is_array( $transient->response ) ) {
+			return $out;
+		}
+
+		$entry = null;
+		$key   = '';
+
+		if ( isset( $transient->response[ $basename ] ) && is_object( $transient->response[ $basename ] ) ) {
+			$entry = $transient->response[ $basename ];
+			$key   = $basename;
+		} else {
+			// No entry under our key: report a dangling one, if any, so the
+			// badge/list mismatch is visible directly.
+			$main = wp_basename( WSS_PLUGIN_FILE );
+			foreach ( $transient->response as $candidate_key => $candidate ) {
+				if ( ! is_object( $candidate ) || empty( $candidate->plugin ) ) {
+					continue;
+				}
+				if ( wp_basename( (string) $candidate->plugin ) !== $main ) {
+					continue;
+				}
+				$entry = $candidate;
+				$key   = (string) $candidate_key;
+				break;
+			}
+		}
+
+		if ( ! is_object( $entry ) ) {
+			return $out;
+		}
+
+		$out['transient_entry'] = true;
+		$out['transient_key']   = $key;
+		$out['new_version']     = isset( $entry->new_version ) ? (string) $entry->new_version : '';
+		$out['package']         = isset( $entry->package ) ? (string) $entry->package : '';
+
+		return $out;
 	}
 
 	/**

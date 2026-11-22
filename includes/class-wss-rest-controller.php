@@ -764,6 +764,9 @@ final class WSS_Rest_Controller {
 			'link_fields'          => WSS_Config::LINK_FIELDS,
 			'required_link_fields' => WSS_Config::LINK_FIELDS_REQUIRED,
 			'plugin_version'       => WSS_VERSION,
+			// Update diagnostics: the real basename and what the
+			// update_plugins transient holds for our main file.
+			'update'               => WSS_GitHub_Updater::diagnostic(),
 			'api_version'          => 'v1',
 			// redis | none — see WSS_Cache::backend().
 			'cache_backend'        => WSS_Cache::backend(),

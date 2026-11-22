@@ -141,7 +141,6 @@ final class WSS_Config {
 
 	public const UPDATER_REPO      = 'Gnoztis/WP-Smart-Search';
 	public const UPDATER_SLUG      = 'wp-smart-search';
-	public const UPDATER_BASENAME  = 'wp-smart-search/wp-smart-search.php';
 	public const UPDATER_CACHE_TTL = 21600;  // 6 hours — successful check.
 	public const UPDATER_ERROR_TTL = 900;    // 15 minutes — failed check.
 
