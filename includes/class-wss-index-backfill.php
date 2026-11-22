@@ -84,7 +84,25 @@ final class WSS_Index_Backfill {
 			'index_version' => '',
 		];
 
-		$state = get_option( self::OPTION, [] );
+		// Read the row directly. get_option() may serve a stale copy from the
+		// alloptions cache (a persistent object cache keeps it across requests,
+		// and the compare-and-swap below bypasses update_option(), so the cache
+		// is not refreshed by it). A stale cursor made every browser step compare
+		// against an old value, lose the swap and report "skipped" forever.
+		global $wpdb;
+
+		$raw = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+				self::OPTION
+			)
+		);
+
+		if ( null === $raw ) {
+			return $defaults;
+		}
+
+		$state = maybe_unserialize( $raw );
 
 		return is_array( $state ) ? array_merge( $defaults, $state ) : $defaults;
 	}
@@ -99,7 +117,13 @@ final class WSS_Index_Backfill {
 	 *                     reads them on every step.
 	 */
 	private static function save_state( array $state, bool $flush = true ): void {
-		update_option( self::OPTION, $state, true );
+		// Never autoloaded: the cursor is large, changes on every batch and must
+		// not be frozen into the alloptions cache that the compare-and-swap
+		// bypasses.
+		add_option( self::OPTION, [], '', 'no' );
+		update_option( self::OPTION, $state, false );
+
+		self::forget_option_cache();
 
 		if ( $flush ) {
 			self::flush_status();
@@ -453,7 +477,21 @@ final class WSS_Index_Backfill {
 		);
 
 		if ( null === $raw ) {
-			return false;
+			// No row yet: create it without autoload so it never lands in the
+			// alloptions cache. A duplicate name means another worker was faster.
+			$inserted = $wpdb->insert(
+				$wpdb->options,
+				[
+					'option_name'  => self::OPTION,
+					'option_value' => maybe_serialize( $state ),
+					'autoload'     => 'no',
+				],
+				[ '%s', '%s', '%s' ]
+			);
+
+			self::forget_option_cache();
+
+			return 1 === (int) $inserted;
 		}
 
 		$current = maybe_unserialize( $raw );
@@ -470,9 +508,23 @@ final class WSS_Index_Backfill {
 			)
 		);
 
-		wp_cache_delete( self::OPTION, 'options' );
+		self::forget_option_cache();
 
 		return 1 === (int) $result;
+	}
+
+	/**
+	 * Drops every cached copy of the state option.
+	 *
+	 * The compare-and-swap writes the row with raw SQL, so update_option() never
+	 * runs and neither the option cache nor the alloptions bucket is invalidated
+	 * by WordPress. With a persistent object cache that left a stale cursor in
+	 * memory and every following step lost the swap.
+	 */
+	private static function forget_option_cache(): void {
+		wp_cache_delete( self::OPTION, 'options' );
+		wp_cache_delete( self::OPTION, 'notoptions' );
+		wp_cache_delete( 'alloptions', 'options' );
 	}
 
 	/**
