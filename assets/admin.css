@@ -6,14 +6,6 @@
 	margin-top: 12px;
 }
 
-.wss-title {
-	font-size: 24px;
-	font-weight: 700;
-	color: #1d2327;
-	letter-spacing: -0.3px;
-	margin: 0 0 20px;
-}
-
 /* ============================================================
    Прогресс-бар
    ============================================================ */
@@ -316,6 +308,148 @@
 	padding: 2px 6px;
 	border-radius: 4px;
 	color: #0a4b78;
+}
+
+/* ============================================================
+   Табы и панели
+   ============================================================ */
+
+.wss-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	width: fit-content;
+	max-width: 100%;
+	margin: 0 0 18px;
+	padding: 4px;
+	background: #f0f0f1;
+	border-radius: 10px;
+}
+
+.wss-tab {
+	display: inline-flex;
+	align-items: center;
+	padding: 6px 14px;
+	border-radius: 7px;
+	font-size: 13px;
+	line-height: 1.5;
+	font-weight: 500;
+	color: #50575e;
+	text-decoration: none;
+	white-space: nowrap;
+	transition: background .15s, color .15s;
+}
+
+.wss-tab:hover {
+	color: #1d2327;
+	background: rgba(255, 255, 255, .6);
+}
+
+.wss-tab.is-active {
+	background: #fff;
+	color: #1d2327;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, .08);
+}
+
+.wss-tab:focus-visible {
+	outline: 2px solid #2271b1;
+	outline-offset: 1px;
+}
+
+/* The attribute is enough, but a stylesheet that sets display on
+   .wss-panel would defeat it. */
+.wss-panel[hidden] {
+	display: none !important;
+}
+
+.wss-panel-card {
+	max-width: 780px;
+	padding: 22px 24px;
+	background: #fff;
+	border: 1px solid #eef0f3;
+	border-radius: 16px;
+	box-shadow: 0 2px 8px rgba(0,0,0,.04);
+}
+
+.wss-panel-title {
+	font-size: 15px;
+	font-weight: 600;
+	color: #1d2327;
+	margin: 0 0 14px;
+}
+
+.wss-panel-subtitle {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: .5px;
+	font-weight: 600;
+	color: #8c8f94;
+	margin: 20px 0 8px;
+}
+
+.wss-panel-text {
+	font-size: 13px;
+	line-height: 1.6;
+	color: #50575e;
+	margin: 0 0 8px;
+}
+
+.wss-panel-card .wss-reset-btn {
+	max-width: 280px;
+}
+
+.wss-api-list {
+	margin: 14px 0 0;
+}
+.wss-api-list dt {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: .5px;
+	color: #8c8f94;
+	font-weight: 600;
+	margin: 12px 0 4px;
+}
+.wss-api-list dt:first-of-type {
+	margin-top: 0;
+}
+.wss-api-list dd {
+	margin: 0;
+	font-size: 13px;
+	color: #50575e;
+	word-break: break-all;
+}
+.wss-api-list dd code {
+	font-size: 12px;
+	background: #f6f7f7;
+	padding: 2px 6px;
+	border-radius: 4px;
+	color: #0a4b78;
+}
+
+.wss-api-method {
+	display: inline-block;
+	margin-left: 6px;
+	padding: 1px 7px;
+	border-radius: 99px;
+	background: #eef6ff;
+	color: #0a4b78;
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: .3px;
+	vertical-align: 1px;
+}
+
+.wss-api-code {
+	margin: 0;
+	padding: 12px 14px;
+	background: #f6f7f7;
+	border: 1px solid #eef0f3;
+	border-radius: 10px;
+	font-size: 12px;
+	line-height: 1.55;
+	color: #1d2327;
+	overflow-x: auto;
+	white-space: pre;
 }
 
 /* ============================================================
@@ -782,10 +916,6 @@ body.wss-dark-page #wpfooter a {
 	color: #9ca3af;
 }
 
-body.wss-dark-page .wss-title {
-	color: #e8ebed;
-}
-
 body.wss-dark-page .wss-progress {
 	background: #2a2f36;
 }
@@ -883,6 +1013,60 @@ body.wss-dark-page .wss-api-body {
 body.wss-dark-page .wss-api-line code {
 	background: #1a1d21;
 	color: #7dd3fc;
+}
+
+body.wss-dark-page .wss-tabs {
+	background: #23272c;
+}
+body.wss-dark-page .wss-tab {
+	color: #9ca3af;
+}
+body.wss-dark-page .wss-tab:hover {
+	background: #2c3238;
+	color: #e8ebed;
+}
+body.wss-dark-page .wss-tab.is-active {
+	background: #353a41;
+	color: #e8ebed;
+	box-shadow: none;
+}
+body.wss-dark-page .wss-tab:focus-visible {
+	outline-color: #4a9eff;
+}
+
+body.wss-dark-page .wss-panel-card {
+	background: #23272c;
+	border-color: #353a41;
+	box-shadow: 0 2px 8px rgba(0,0,0,.35);
+}
+body.wss-dark-page .wss-panel-title {
+	color: #e8ebed;
+}
+body.wss-dark-page .wss-panel-subtitle {
+	color: #9ca3af;
+}
+body.wss-dark-page .wss-panel-text {
+	color: #c9cdd2;
+}
+
+body.wss-dark-page .wss-api-list dt {
+	color: #9ca3af;
+}
+body.wss-dark-page .wss-api-list dd {
+	color: #c9cdd2;
+}
+body.wss-dark-page .wss-api-list dd code {
+	background: #1a1d21;
+	color: #7dd3fc;
+}
+body.wss-dark-page .wss-api-method {
+	background: #1e3a52;
+	color: #7dd3fc;
+}
+body.wss-dark-page .wss-api-code {
+	background: #1a1d21;
+	border-color: #353a41;
+	color: #e8ebed;
 }
 
 body.wss-dark-page .wss-status {
@@ -1093,5 +1277,8 @@ body.wss-dark-page .wss-empty {
 	.wss-submit {
 		width: 100%;
 		height: 44px;
+	}
+	.wss-panel-card {
+		padding: 16px;
 	}
 }

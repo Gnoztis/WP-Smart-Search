@@ -549,6 +549,99 @@
 		}
 
 		/* ============================================================
+		   Tabs
+		   ============================================================ */
+
+		var $tabs   = $('.wss-tabs [role="tab"]');
+		var $panels = $('.wss-panel');
+
+		function tabSlug($tab) {
+			return String($tab.attr('data-tab') || 'search');
+		}
+
+		/* Keeps ?tab= in the address bar in sync, without a reload. */
+		function setTabParam(slug) {
+			if (!window.history || !window.history.replaceState) {
+				return;
+			}
+
+			var parts = window.location.href.split('#')[0].split('?');
+			var base  = parts.shift();
+			var query = parts.length ? parts.join('?').split('&') : [];
+			var kept  = [];
+
+			for (var i = 0; i < query.length; i++) {
+				if (!query[i] || query[i].indexOf('tab=') === 0) {
+					continue;
+				}
+				kept.push(query[i]);
+			}
+			if (slug !== 'search') {
+				kept.push('tab=' + encodeURIComponent(slug));
+			}
+
+			window.history.replaceState({}, '', base + (kept.length ? '?' + kept.join('&') : ''));
+		}
+
+		function activateTab($tab, moveFocus) {
+			if (!$tab || !$tab.length) {
+				return;
+			}
+
+			var panel = String($tab.attr('aria-controls') || '');
+
+			$tabs.each(function () {
+				var $t = $(this);
+				var isActive = $t[0] === $tab[0];
+				$t.attr('aria-selected', isActive ? 'true' : 'false')
+					.attr('tabindex', isActive ? '0' : '-1')
+					.toggleClass('is-active', isActive);
+			});
+
+			$panels.each(function () {
+				this.hidden = (this.id !== panel);
+			});
+
+			setTabParam(tabSlug($tab));
+
+			if (moveFocus) {
+				$tab.trigger('focus');
+			}
+		}
+
+		$tabs.on('click', function (e) {
+			// The same link without JS reloads the page with ?tab=… and the
+			// server renders that tab; with JS the switch is instant.
+			e.preventDefault();
+			activateTab($(this), false);
+		});
+
+		$tabs.on('keydown', function (e) {
+			var index = $tabs.index(this);
+			var last  = $tabs.length - 1;
+			var next  = null;
+
+			if (e.key === 'ArrowRight' || e.key === 'Right') {
+				next = index >= last ? 0 : index + 1;
+			} else if (e.key === 'ArrowLeft' || e.key === 'Left') {
+				next = index <= 0 ? last : index - 1;
+			} else if (e.key === 'Home') {
+				next = 0;
+			} else if (e.key === 'End') {
+				next = last;
+			} else if (e.key === ' ' || e.key === 'Spacebar' || e.key === 'Enter') {
+				e.preventDefault();
+				activateTab($(this), true);
+				return;
+			}
+
+			if (next !== null) {
+				e.preventDefault();
+				activateTab($tabs.eq(next), true);
+			}
+		});
+
+		/* ============================================================
 		   Events
 		   ============================================================ */
 
