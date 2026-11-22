@@ -531,6 +531,29 @@
 	color: #1d2327;
 	overflow-x: auto;
 	white-space: pre;
+	/* A block that inherits a first-line indent shifts only line one;
+	   inside white-space: pre that reads as a stray leading space. */
+	text-indent: 0;
+}
+
+/* Console commands: one block element per line, so no line can be
+   formatted differently from the others. */
+.wss-cli {
+	padding: 12px 14px;
+	font-family: Menlo, Consolas, Monaco, monospace;
+	white-space: normal;
+	text-indent: 0;
+}
+
+.wss-cli-line {
+	display: block;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	background: none;
+	font: inherit;
+	text-indent: 0;
+	white-space: pre;
 }
 
 /* ============================================================
@@ -1160,6 +1183,12 @@ body.wss-dark-page .wss-doc-table tbody code {
 	color: #7dd3fc;
 }
 body.wss-dark-page .wss-api-code {
+	background: #1a1d21;
+	border-color: #353a41;
+	color: #e8ebed;
+}
+
+body.wss-dark-page .wss-cli {
 	background: #1a1d21;
 	border-color: #353a41;
 	color: #e8ebed;

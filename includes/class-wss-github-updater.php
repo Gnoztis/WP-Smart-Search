@@ -61,6 +61,13 @@ final class WSS_GitHub_Updater {
 	 * Adds our entry to the update_plugins transient when GitHub has a
 	 * release newer than the installed version.
 	 *
+	 * The comparison is made against both the version constant and the
+	 * header of the file on disk: inside the request that replaces the
+	 * files, core re-writes this transient while the constant still holds
+	 * the version loaded at the start of the request. Comparing only with
+	 * the constant would re-inject "2.5.0 -> 2.5.0" right after a
+	 * successful update, and the phantom entry would live up to 12 hours.
+	 *
 	 * @param mixed $transient
 	 * @return mixed
 	 */
@@ -72,19 +79,27 @@ final class WSS_GitHub_Updater {
 			$transient->response = [];
 		}
 
-		$basename = self::basename();
+		$basename  = self::basename();
+		$installed = $this->installed_version();
 
 		// Runs before the early returns: a dangling entry is a leftover of
 		// the previous key and must disappear even when GitHub is
 		// unreachable right now.
 		$this->purge_stale_entries( $transient, $basename );
 
+		// The entry offers what is already on disk: drop it, so a phantom
+		// left by an earlier run disappears on this one.
+		$this->purge_installed_entry( $transient, $basename, $installed );
+
 		$release = $this->get_release();
 		if ( $release === null ) {
 			return $transient;
 		}
 
-		if ( version_compare( $release['version'], WSS_VERSION, '<=' ) ) {
+		// Newer than the running code (constant) and than the files on
+		// disk (header), otherwise there is nothing to install.
+		if ( version_compare( $release['version'], WSS_VERSION, '<=' )
+			|| version_compare( $release['version'], $installed, '<=' ) ) {
 			return $transient;
 		}
 
@@ -108,6 +123,55 @@ final class WSS_GitHub_Updater {
 		}
 
 		return $transient;
+	}
+
+	/**
+	 * Version of the main plugin file as it is on disk.
+	 *
+	 * Deliberately not cached in a static: the whole point is to see the
+	 * files after Plugin_Upgrader replaced them within the current request.
+	 * get_file_data() reads the first 8 KB of one file, so the cost is
+	 * negligible next to the transient write it guards.
+	 */
+	private function installed_version(): string {
+		$data = function_exists( 'get_file_data' )
+			? get_file_data( WSS_PLUGIN_FILE, [ 'Version' => 'Version' ], 'plugin' )
+			: [];
+
+		$version = isset( $data['Version'] ) ? trim( (string) $data['Version'] ) : '';
+
+		return $version !== '' ? $version : WSS_VERSION;
+	}
+
+	/**
+	 * Removes our own update entry when it offers what is already installed.
+	 *
+	 * Core compares the entry's new_version with the version from
+	 * get_plugins() and shows the row as an update anyway until the
+	 * transient is rebuilt, so the entry must not stay in response.
+	 *
+	 * @param mixed  $transient
+	 * @param string $basename Our key in the transient.
+	 * @param string $installed Version from the file on disk.
+	 */
+	private function purge_installed_entry( $transient, string $basename, string $installed ): void {
+		if ( ! isset( $transient->response[ $basename ] ) || ! is_object( $transient->response[ $basename ] ) ) {
+			return;
+		}
+
+		$entry   = $transient->response[ $basename ];
+		$offered = isset( $entry->new_version ) ? trim( (string) $entry->new_version ) : '';
+
+		if ( $offered === '' || version_compare( $offered, $installed, '<=' ) ) {
+			unset( $transient->response[ $basename ] );
+			return;
+		}
+
+		// Not newer than the constant either — the same phantom, seen from
+		// the other side.
+		if ( version_compare( $offered, WSS_VERSION, '<=' ) ) {
+			unset( $transient->response[ $basename ] );
+		}
 	}
 
 	/**
@@ -363,10 +427,18 @@ final class WSS_GitHub_Updater {
 		exit;
 	}
 
+	/**
+	 * Drops every cached value of this class.
+	 *
+	 * Called after an upgrade, so the next run does not reuse the release
+	 * data (and the header values) read before the files were replaced.
+	 */
 	private function flush(): void {
 		delete_transient( self::TRANSIENT );
 		delete_transient( self::ERROR_TRANSIENT );
 		delete_site_transient( 'update_plugins' );
+
+		self::$header = null;
 	}
 
 	/* ============================================================

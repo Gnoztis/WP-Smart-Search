@@ -122,13 +122,14 @@ final class WSS_Admin_Page {
 					'nextPage'      => __( 'Следующая страница', 'wp-smart-search' ),
 					'pageLabel'     => __( 'Страница %d', 'wp-smart-search' ),
 					'emptyState'    => __( 'Введите запрос для поиска по записям и тегам', 'wp-smart-search' ),
-					'indexRunning'  => __( 'Переиндексация…', 'wp-smart-search' ),
-					'indexProgress' => __( 'Обработано %1$d из %2$d (%3$d%)', 'wp-smart-search' ),
-					'indexDone'     => __( 'Готово.', 'wp-smart-search' ),
-					'indexStopped'  => __( 'Остановлено. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
-					'indexBusy'     => __( 'Фоновая пересборка уже выполняется. Попробуйте позже.', 'wp-smart-search' ),
-					'indexError'    => __( 'Ошибка запроса. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
-					'indexCounts'   => __( 'Ссылок в индексе: %1$d, записей: %2$d', 'wp-smart-search' ),
+					'indexRunning'   => __( 'Переиндексация…', 'wp-smart-search' ),
+					'indexProgress'  => __( 'Обработано %1$d из %2$d (%3$d%)', 'wp-smart-search' ),
+					'indexObserving' => __( 'Идёт фоновая пересборка, показываем прогресс: %1$d из %2$d (%3$d%)', 'wp-smart-search' ),
+					'indexDone'      => __( 'Готово.', 'wp-smart-search' ),
+					'indexStopped'   => __( 'Остановлено. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
+					'indexBusyStuck' => __( 'Фоновая пересборка не двигается уже 5 минут. Прогресс и курсор сохранены — она продолжится позже либо запустите доиндексацию снова.', 'wp-smart-search' ),
+					'indexError'     => __( 'Ошибка запроса. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
+					'indexCounts'    => __( 'Ссылок в индексе: %1$d, записей: %2$d', 'wp-smart-search' ),
 				],
 			];
 
@@ -471,7 +472,11 @@ final class WSS_Admin_Page {
 					<?php endif; ?>
 
 					<p class="wss-panel-subtitle"><?php esc_html_e( 'Из консоли', 'wp-smart-search' ); ?></p>
-					<pre class="wss-api-code"><code><?php echo esc_html( implode( "\n", $cli_commands ) ); ?></code></pre>
+					<div class="wss-api-code wss-cli">
+						<?php foreach ( $cli_commands as $cli_command ) : ?>
+							<code class="wss-cli-line"><?php echo esc_html( $cli_command ); ?></code>
+						<?php endforeach; ?>
+					</div>
 				</div>
 			</section>
 		</div>

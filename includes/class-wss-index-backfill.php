@@ -32,7 +32,11 @@ final class WSS_Index_Backfill {
 
 	private const OPTION            = 'wss_index_backfill_state';
 	private const LOCK              = 'wss_index_backfill_lock';
-	private const LOCK_TTL          = 300;
+	/**
+	 * Seconds a lock is considered alive. A batch never runs longer than
+	 * TIME_BUDGET, so a lock older than this belongs to a dead worker.
+	 */
+	private const LOCK_TTL          = 60;
 	private const DEFAULT_BATCH     = 50;
 	private const TIME_BUDGET       = 20.0;
 	private const MAX_ERRORS        = 100;
@@ -154,6 +158,31 @@ final class WSS_Index_Backfill {
 	 * ============================================================ */
 
 	/**
+	 * Whether another worker is running right now.
+	 *
+	 * The lock value is the timestamp of the run that took it. A lock older
+	 * than LOCK_TTL belongs to a worker that died (fatal error, killed
+	 * request, deploy) — it is removed so a crash cannot block the rebuild
+	 * for minutes. A fresh lock always means a live worker: one batch runs
+	 * at most TIME_BUDGET seconds, well under LOCK_TTL.
+	 */
+	public function is_busy(): bool {
+		$lock = get_transient( self::LOCK );
+
+		if ( ! $lock ) {
+			return false;
+		}
+
+		$taken = (int) $lock;
+		if ( $taken > 0 && ( time() - $taken ) > self::LOCK_TTL ) {
+			delete_transient( self::LOCK );
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
 	 * Processes one batch. Scheduled with wp_schedule_single_event(), called
 	 * by the AJAX step endpoint, and safe to call manually.
 	 *
@@ -163,7 +192,7 @@ final class WSS_Index_Backfill {
 	 *                the job is finished after this call, 'ran' otherwise.
 	 */
 	public function run( bool $reschedule = true ): string {
-		if ( get_transient( self::LOCK ) ) {
+		if ( $this->is_busy() ) {
 			return 'busy';
 		}
 		set_transient( self::LOCK, time(), self::LOCK_TTL );

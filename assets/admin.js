@@ -654,12 +654,18 @@
 		var indexActive  = false;
 		var indexTimer   = null;
 
+		/* While another worker holds the lock the loop only watches it. If the
+		   lock never clears, the background job is stuck: stop after 5 min. */
+		var indexBusySince = 0;
+		var INDEX_BUSY_GIVEUP = 5 * 60 * 1000;
+		var INDEX_RETRY_DEFAULT = 2000;
+
 		/* The runner only makes sense with JS: reveal it here. */
 		if ($indexRunner.length) {
 			$indexRunner.removeAttr('hidden');
 		}
 
-		function indexPaint(data) {
+		function indexPaint(data, observing) {
 			var percent = parseInt(data.percent, 10);
 			if (isNaN(percent)) {
 				percent = 0;
@@ -670,8 +676,10 @@
 				.attr('aria-valuenow', percent)
 				.css('width', percent + '%');
 
+			var template = observing ? WSS.i18n.indexObserving : WSS.i18n.indexProgress;
+
 			$indexText.text(
-				WSS.i18n.indexProgress
+				template
 					.replace('%1$d', data.processed || 0)
 					.replace('%2$d', data.total || 0)
 					.replace('%3$d', percent)
@@ -688,6 +696,7 @@
 
 		function indexReset() {
 			indexActive = false;
+			indexBusySince = 0;
 			if (indexTimer) {
 				clearTimeout(indexTimer);
 				indexTimer = null;
@@ -699,6 +708,32 @@
 		function indexStopWith(message) {
 			indexReset();
 			$indexText.text(message);
+		}
+
+		function indexRetryAfter(data) {
+			var retry = parseInt(data.retry_after, 10);
+			if (isNaN(retry) || retry < 1) {
+				return INDEX_RETRY_DEFAULT;
+			}
+			return Math.min(30, retry) * 1000;
+		}
+
+		/* Observation mode: another worker is rebuilding, show its progress. */
+		function indexObserve(data) {
+			if (!indexBusySince) {
+				indexBusySince = Date.now();
+			}
+
+			indexPaint(data, true);
+
+			if (Date.now() - indexBusySince > INDEX_BUSY_GIVEUP) {
+				indexStopWith(WSS.i18n.indexBusyStuck);
+				return;
+			}
+
+			indexTimer = setTimeout(function () {
+				indexStep(false);
+			}, indexRetryAfter(data));
 		}
 
 		function indexStep(isFirst) {
@@ -725,12 +760,17 @@
 				}
 
 				var data = res.data || {};
-				indexPaint(data);
 
+				// Busy is a normal answer: someone else is working, so keep
+				// watching instead of stopping with an error.
 				if (data.busy) {
-					indexStopWith(data.message || WSS.i18n.indexBusy);
+					indexObserve(data);
 					return;
 				}
+
+				indexBusySince = 0;
+				indexPaint(data, false);
+
 				if (data.done) {
 					indexReset();
 					$indexText.text(data.message || WSS.i18n.indexDone);

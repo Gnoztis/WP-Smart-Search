@@ -26,8 +26,12 @@ final class WSS_Ajax_Handler {
 	 * The browser loop (the indexing tab) sends one request per batch so a
 	 * host without a working WP-Cron — or one where a cron batch takes too
 	 * long — still gets visible progress. The step shares WSS_Index_Backfill
-	 * with the cron worker: whoever takes the lock first works, the other
-	 * answers busy.
+	 * with the cron worker: whoever takes the lock first works.
+	 *
+	 * When the lock is held by a live worker the answer is not an error: the
+	 * browser switches to observation and reports the progress of that job.
+	 * Only the first request of a run (`start=1`) may reset a finished job,
+	 * so watching the background worker finish does not start a new one.
 	 */
 	public function handle_index_step(): void {
 		nocache_headers();
@@ -47,33 +51,59 @@ final class WSS_Ajax_Handler {
 			wp_send_json_error( [ 'message' => __( 'Недостаточно прав для переиндексации.', 'wp-smart-search' ) ], 403 );
 		}
 
-		// A finished job is reset, a running one keeps its cursor; no cron
-		// event is queued, the browser drives this run.
-		WSS_Index_Backfill::start( false );
+		// Another worker is running: report its progress instead of resetting
+		// the job under it or answering with an error.
+		if ( $this->backfill->is_busy() ) {
+			$this->send_step_progress( true, __( 'Идёт фоновая пересборка, показываем прогресс.', 'wp-smart-search' ) );
+			return;
+		}
+
+		$start = isset( $_POST['start'] ) ? absint( wp_unslash( $_POST['start'] ) ) : 0;
+
+		// A finished job is reset only when the run starts; a loop that is
+		// already driving the job keeps the cursor. No cron event is queued.
+		if ( $start > 0 ) {
+			WSS_Index_Backfill::start( false );
+		}
 
 		$result = $this->backfill->run( false );
-		$status = WSS_Index_Backfill::status( true );
 
+		// The lock may have been taken between the check and the run.
+		if ( 'busy' === $result ) {
+			$this->send_step_progress( true, __( 'Идёт фоновая пересборка, показываем прогресс.', 'wp-smart-search' ) );
+			return;
+		}
+
+		$this->send_step_progress( false );
+	}
+
+	/**
+	 * Success payload of one step: progress of the job, whoever drives it.
+	 *
+	 * @param bool   $busy    Another worker holds the lock (observation mode).
+	 * @param string $message Text for the client; "Готово." when finished.
+	 */
+	private function send_step_progress( bool $busy, string $message = '' ): void {
+		$status    = WSS_Index_Backfill::status( true );
 		$total     = (int) ( $status['posts'] ?? 0 );
 		$processed = (int) $status['processed'];
-		$percent   = $total > 0 ? (int) min( 100, (int) round( $processed * 100 / $total ) ) : 0;
+		$done      = ! $busy && ! empty( $status['done'] );
 
-		$message = '';
-		if ( 'busy' === $result ) {
-			$message = __( 'Фоновая пересборка уже выполняется. Попробуйте позже.', 'wp-smart-search' );
-		} elseif ( ! empty( $status['done'] ) ) {
+		if ( $message === '' && $done ) {
 			$message = __( 'Готово.', 'wp-smart-search' );
 		}
 
 		wp_send_json_success( [
-			'done'      => ! empty( $status['done'] ),
-			'processed' => $processed,
-			'total'     => $total,
-			'percent'   => $percent,
-			'errors'    => (int) $status['errors'],
-			'busy'      => 'busy' === $result,
-			'links'     => isset( $status['links'] ) ? (int) $status['links'] : null,
-			'message'   => $message,
+			'done'        => $done,
+			'processed'   => $processed,
+			'total'       => $total,
+			'percent'     => $total > 0 ? (int) min( 100, (int) round( $processed * 100 / $total ) ) : 0,
+			'errors'      => (int) $status['errors'],
+			'busy'        => $busy,
+			// The browser polls again instead of stopping.
+			'retry_after' => $busy ? 2 : 0,
+			'links'       => isset( $status['links'] ) ? (int) $status['links'] : null,
+			'message'     => $message,
 		] );
 	}
 
