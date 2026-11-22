@@ -284,15 +284,21 @@ final class WSS_Search_Engine {
 			$exclude = array_slice( $exclude, 0, WSS_Config::MAX_EXCLUDE );
 		}
 
+		// Honoured only when the match list had to be cut: the engine then
+		// either counts the matches separately or reports the list size
+		// (see search_posts()).
+		$exact_total = ! isset( $input['exact_total'] ) || $this->to_bool( $input['exact_total'], true );
+
 		return [
-			'statuses'   => $statuses,
-			'date_range' => $date_range,
-			'author'     => $author,
-			'orderby'    => $orderby,
-			'exclude'    => $exclude,
-			'post_type'  => $post_type,
-			'date_from'  => isset( $input['date_from'] ) ? (string) $input['date_from'] : '',
-			'date_to'    => isset( $input['date_to'] )   ? (string) $input['date_to']   : '',
+			'statuses'    => $statuses,
+			'date_range'  => $date_range,
+			'author'      => $author,
+			'orderby'     => $orderby,
+			'exclude'     => $exclude,
+			'post_type'   => $post_type,
+			'date_from'   => isset( $input['date_from'] ) ? (string) $input['date_from'] : '',
+			'date_to'     => isset( $input['date_to'] )   ? (string) $input['date_to']   : '',
+			'exact_total' => $exact_total,
 		];
 	}
 
@@ -372,13 +378,17 @@ final class WSS_Search_Engine {
 	 *
 	 * own: published posts plus the user's own posts in other statuses.
 	 *
+	 * Private posts of other authors are only reachable for users with
+	 * both edit_others_posts and read_private_posts — see
+	 * WSS_Config::can_search_all_statuses().
+	 *
 	 * @return array{sql:string,params:array<int,mixed>}
 	 */
 	private function status_scope( array $filters ): array {
 		$statuses = $filters['statuses'];
 		$uid      = (int) get_current_user_id();
 
-		if ( $uid > 0 && current_user_can( 'edit_others_posts' ) ) {
+		if ( $uid > 0 && WSS_Config::can_search_all_statuses() ) {
 			$ph = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
 			return [
 				'sql'    => "p.post_status IN ($ph)",
@@ -531,7 +541,7 @@ final class WSS_Search_Engine {
 	}
 
 	/* ============================================================
-	 *  Posts: full-list cache + slice
+	 *  Posts: chunked match list + cache + slice
 	 * ============================================================ */
 
 	private function search_posts(
@@ -547,7 +557,7 @@ final class WSS_Search_Engine {
 		// not on whether the request came via API or AJAX. The visibility
 		// mode is part of the key so a switch between shared and own never
 		// serves entries built under the other model.
-		$scope = current_user_can( 'edit_others_posts' )
+		$scope = WSS_Config::can_search_all_statuses()
 			? 'e'
 			: 'u' . (int) get_current_user_id();
 
@@ -568,11 +578,14 @@ final class WSS_Search_Engine {
 			] ) ) . '_'
 			. md5( implode( '|', $words ) );
 
-		$all = $this->cache->get( $cache_key );
-		if ( $all === null ) {
-			$all = $this->build_posts_list( $words, $patterns, $filters, $is_api, $match );
-			$this->cache->set( $cache_key, $all, WSS_Config::POSTS_CACHE_TTL );
+		$cached = $this->cache->get( $cache_key );
+		if ( ! is_array( $cached ) || ! isset( $cached['items'] ) || ! is_array( $cached['items'] ) ) {
+			$cached = $this->build_posts_list( $words, $patterns, $filters, $is_api, $match );
+			$this->cache->set( $cache_key, $cached, WSS_Config::POSTS_CACHE_TTL );
 		}
+
+		$all       = $cached['items'];
+		$truncated = ! empty( $cached['truncated'] );
 
 		usort( $all, function ( $a, $b ) use ( $filters ) {
 			$ea = ! empty( $a['exact_match'] );
@@ -591,8 +604,22 @@ final class WSS_Search_Engine {
 			return $filters['orderby'] === 'date_asc' ? $da <=> $db : $db <=> $da;
 		} );
 
-		$total       = count( $all );
-		$total_pages = max( 1, (int) ceil( $total / $per_page ) );
+		// $total is the number of items in the list, except for a cut list:
+		// then the client asked for the exact number and gets a COUNT over
+		// the same WHERE, so `total` stays meaningful while `truncated`
+		// says the list itself stops at WSS_Config::MAX_MATCHED_POSTS.
+		$reachable = count( $all );
+		$total     = $reachable;
+		if ( $truncated && ! empty( $filters['exact_total'] ) ) {
+			// A failed COUNT returns 0, which cannot be right here: the list
+			// was cut, so at least MAX_MATCHED_POSTS posts matched.
+			$counted = $this->count_matching_posts( $this->fuzzy_conditions( $words, $filters ) );
+			$total   = $counted > 0 ? $counted : $reachable;
+		}
+
+		// Pages cover the items that really exist: with a cut list the last
+		// page must not be empty just because `total` is bigger.
+		$total_pages = max( 1, (int) ceil( ( $truncated ? $reachable : $total ) / $per_page ) );
 		$page        = min( $page, $total_pages );
 		$offset      = ( $page - 1 ) * $per_page;
 		$items       = array_slice( $all, $offset, $per_page );
@@ -612,6 +639,7 @@ final class WSS_Search_Engine {
 		return [
 			'items'       => array_values( $items ),
 			'total'       => $total,
+			'truncated'   => $truncated,
 			'page'        => $page,
 			'per_page'    => $per_page,
 			'total_pages' => $total_pages,
@@ -619,7 +647,15 @@ final class WSS_Search_Engine {
 	}
 
 	/**
-	 * Complete (untruncated) match list.
+	 * Match list of the current query.
+	 *
+	 * Rows are read in batches and formatted one by one, so the peak memory
+	 * is one batch of post_content plus the finished items — never the whole
+	 * table. The number of matched posts is capped by
+	 * WSS_Config::MAX_MATCHED_POSTS; `truncated` tells the caller the list
+	 * was cut (and that `total` then needs a separate COUNT).
+	 *
+	 * @return array{items:array<int,array>,truncated:bool}
 	 */
 	private function build_posts_list(
 		array $words,
@@ -632,46 +668,75 @@ final class WSS_Search_Engine {
 
 		if ( $match === 'exact' ) {
 			$exact = $this->find_exact_post( $q, $filters, $is_api );
-			return $exact ? [ $this->format_post_item( $exact, $words, true ) ] : [];
+			return [
+				'items'     => $exact ? [ $this->format_post_item( $exact, $words, true ) ] : [],
+				'truncated' => false,
+			];
 		}
 
-		$rows = $this->query_fuzzy( $words, $patterns, $filters );
+		$items = [];
+		$seen  = [];
 
-		$exact_post = null;
+		// An exact permalink match goes first and is never counted against
+		// the cap: it is the most relevant item of the query.
 		if ( $match === 'auto' ) {
 			$exact_post = $this->find_exact_post( $q, $filters, $is_api );
-			if ( $exact_post ) {
-				$found = false;
-				foreach ( $rows as $r ) {
-					if ( (int) $r->ID === (int) $exact_post->ID ) {
-						$found = true;
-						break;
-					}
-				}
-				if ( ! $found ) {
-					$rows[] = $this->wp_post_to_row( $exact_post );
-				}
+			if ( $exact_post instanceof WP_Post ) {
+				$items[]                      = $this->format_post_item( $exact_post, $words, true );
+				$seen[ (int) $exact_post->ID ] = true;
 			}
 		}
 
-		$out = [];
-		foreach ( $rows as $row ) {
-			$is_exact = $exact_post instanceof WP_Post && (int) $row->ID === (int) $exact_post->ID;
+		$where     = $this->fuzzy_conditions( $words, $filters );
+		$cap       = max( 1, (int) WSS_Config::MAX_MATCHED_POSTS );
+		$chunk     = max( 1, (int) WSS_Config::MATCH_CHUNK_SIZE );
+		$offset    = 0;
+		$matched   = 0;
+		$truncated = false;
 
-			if ( ! $is_exact ) {
-				$haystack = $this->row_haystack( $row );
-				if ( ! $this->matches_all_words( $haystack, $patterns ) ) {
+		while ( true ) {
+			$rows    = $this->query_fuzzy_rows( $where, $filters, $chunk, $offset );
+			$offset += $chunk;
+
+			foreach ( $rows as $row ) {
+				$id = (int) $row->ID;
+				if ( isset( $seen[ $id ] ) ) {
 					continue;
 				}
+				if ( ! $this->matches_all_words( $this->row_haystack( $row ), $patterns ) ) {
+					continue;
+				}
+
+				$seen[ $id ] = true;
+				$items[]     = $this->format_row( $row, $words, false );
+				$matched++;
+
+				// The engine stops at the limit instead of probing for one
+				// more row, so exactly MAX_MATCHED_POSTS matches also set
+				// the flag. `total` stays exact when it is reported.
+				if ( $matched >= $cap ) {
+					$truncated = true;
+					break 2;
+				}
 			}
 
-			$out[] = $this->format_row( $row, $words, $is_exact );
+			if ( count( $rows ) < $chunk ) {
+				break;
+			}
 		}
 
-		return $out;
+		return [
+			'items'     => $items,
+			'truncated' => $truncated,
+		];
 	}
 
-	private function query_fuzzy( array $words, array $patterns, array $filters ): array {
+	/**
+	 * WHERE clause shared by the row batches and the exact COUNT.
+	 *
+	 * @return array{sql:string,params:array<int,mixed>}
+	 */
+	private function fuzzy_conditions( array $words, array $filters ): array {
 		global $wpdb;
 
 		$where  = [];
@@ -736,17 +801,53 @@ final class WSS_Search_Engine {
 			}
 		}
 
+		return [
+			'sql'    => implode( ' AND ', $where ),
+			'params' => $params,
+		];
+	}
+
+	/**
+	 * One batch of matching rows, ordered by date.
+	 *
+	 * p.ID is the tiebreaker: rows sharing a post_date need a deterministic
+	 * order, otherwise LIMIT/OFFSET can skip or repeat a row between
+	 * batches.
+	 *
+	 * @param array{sql:string,params:array<int,mixed>} $where
+	 * @return array<int,object>
+	 */
+	private function query_fuzzy_rows( array $where, array $filters, int $limit, int $offset ): array {
+		global $wpdb;
+
 		$order = $filters['orderby'] === 'date_asc' ? 'ASC' : 'DESC';
 
 		$sql = "SELECT p.ID, p.post_title, p.post_content, p.post_excerpt,
 					p.post_status, p.post_date, p.post_author, p.post_type
 			FROM {$wpdb->posts} AS p
-			WHERE " . implode( ' AND ', $where ) . "
-			ORDER BY p.post_date $order";
+			WHERE " . $where['sql'] . "
+			ORDER BY p.post_date $order, p.ID $order
+			LIMIT %d OFFSET %d";
+
+		$params = array_merge( $where['params'], [ $limit, $offset ] );
 
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 		$rows = $wpdb->get_results( $wpdb->prepare( $sql, $params ) );
 		return is_array( $rows ) ? $rows : [];
+	}
+
+	/**
+	 * Exact number of matching posts — only used when the list was cut.
+	 *
+	 * @param array{sql:string,params:array<int,mixed>} $where
+	 */
+	private function count_matching_posts( array $where ): int {
+		global $wpdb;
+
+		$sql = "SELECT COUNT(*) FROM {$wpdb->posts} AS p WHERE " . $where['sql'];
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		return (int) $wpdb->get_var( $wpdb->prepare( $sql, $where['params'] ) );
 	}
 
 	/* ============================================================
@@ -858,7 +959,7 @@ final class WSS_Search_Engine {
 		if ( $filters['author'] > 0 && (int) $post->post_author !== (int) $filters['author'] ) {
 			return false;
 		}
-		if ( ! current_user_can( 'edit_others_posts' ) ) {
+		if ( ! WSS_Config::can_search_all_statuses() ) {
 			$uid = (int) get_current_user_id();
 			if ( $uid <= 0 ) {
 				return false;
@@ -1373,9 +1474,23 @@ final class WSS_Search_Engine {
 			);
 		}
 
+		// Every element must be a scalar: a nested array would otherwise be
+		// cast to the string "Array" and turn into a confusing 400.
+		$clean = [];
+		foreach ( $fields as $field ) {
+			if ( ! is_scalar( $field ) ) {
+				return new WP_Error(
+					'wss_invalid_fields',
+					__( 'Параметр fields должен содержать строки.', 'wp-smart-search' ),
+					[ 'status' => 400 ]
+				);
+			}
+			$clean[] = (string) $field;
+		}
+
 		$fields = array_values( array_unique( array_filter( array_map(
-			static fn( $f ) => sanitize_key( (string) $f ),
-			$fields
+			'sanitize_key',
+			$clean
 		) ) ) );
 
 		if ( empty( $fields ) ) {

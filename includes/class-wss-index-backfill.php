@@ -38,6 +38,10 @@ final class WSS_Index_Backfill {
 	private const MAX_ERRORS        = 100;
 	private const SCHEDULE_DELAY    = 10;
 
+	/** Cached snapshot of the counters (diagnostics, not the job state). */
+	private const STATUS_TRANSIENT = 'wss_index_status';
+	private const STATUS_TTL       = 600;
+
 	private WSS_Links_Indexer $indexer;
 
 	public function __construct( ?WSS_Links_Indexer $indexer = null ) {
@@ -73,6 +77,10 @@ final class WSS_Index_Backfill {
 
 	private static function save_state( array $state ): void {
 		update_option( self::OPTION, $state, true );
+
+		// Every state change (start, each batch, finish, clear) can change
+		// what the counters describe, so the cached snapshot goes with it.
+		self::flush_status();
 	}
 
 	/**
@@ -281,20 +289,75 @@ final class WSS_Index_Backfill {
 	/**
 	 * Compact status for /wss/v1/me, the admin screen and WP-CLI.
 	 *
-	 * @return array{table:bool,links:int,posts:int,done:bool,cursor:int,processed:int,errors:int}
+	 * The rebuild state (done/cursor/processed) is one option read and is
+	 * always fresh. The expensive part — table existence and the two
+	 * COUNT(*) queries — is cached in a transient for STATUS_TTL and
+	 * dropped by save_state() (start/finish/clear) and by the cache
+	 * generation bump on a post save.
+	 *
+	 * Absolute counters describe the whole site, so they are reported only
+	 * to administrators: the search screen of an author must not become a
+	 * way to estimate the size of someone else's content. Pass
+	 * $with_counts = true from WP-CLI, which has no user to check.
+	 *
+	 * @param bool|null $with_counts True/false to force, null to decide by capability.
+	 * @return array{table:bool,done:bool,cursor:int,processed:int,errors:int,links?:int,posts?:int}
 	 */
-	public static function status(): array {
+	public static function status( ?bool $with_counts = null ): array {
 		$state = self::state();
 
-		return [
-			'table'     => WSS_Links_Indexer::table_exists(),
-			'links'     => WSS_Links_Indexer::count_rows(),
-			'posts'     => WSS_Links_Indexer::count_posts(),
+		$with_counts = $with_counts ?? current_user_can( 'manage_options' );
+		$snapshot    = self::snapshot();
+
+		$out = [
+			'table'     => (bool) $snapshot['table'],
 			'done'      => (bool) $state['done'],
 			'cursor'    => (int) $state['cursor'],
 			'processed' => (int) $state['processed'],
 			'errors'    => (int) $state['errors'],
 		];
+
+		if ( $with_counts ) {
+			$out['links'] = (int) $snapshot['links'];
+			$out['posts'] = (int) $snapshot['posts'];
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Table existence and index counters, cached for STATUS_TTL.
+	 *
+	 * The counters are kept even when the caller may not see them: one
+	 * shared snapshot serves every caller, and computing them only for
+	 * administrators would need a second cache key.
+	 *
+	 * @return array{table:bool,links:int,posts:int}
+	 */
+	private static function snapshot(): array {
+		$cached = get_transient( self::STATUS_TRANSIENT );
+		if ( is_array( $cached ) && isset( $cached['table'], $cached['links'], $cached['posts'] ) ) {
+			return $cached;
+		}
+
+		$snapshot = [
+			'table' => WSS_Links_Indexer::table_exists(),
+			'links' => WSS_Links_Indexer::count_rows(),
+			'posts' => WSS_Links_Indexer::count_posts(),
+		];
+
+		set_transient( self::STATUS_TRANSIENT, $snapshot, self::STATUS_TTL );
+
+		return $snapshot;
+	}
+
+	/**
+	 * Drops the cached snapshot. Called when the index or the table may
+	 * have changed: rebuild start/finish/clear and the cache generation
+	 * bump after a post save.
+	 */
+	public static function flush_status(): void {
+		delete_transient( self::STATUS_TRANSIENT );
 	}
 
 	/**

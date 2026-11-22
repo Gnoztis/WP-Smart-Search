@@ -31,6 +31,10 @@ if ( ! function_exists( 'wss_uninstall_site' ) ) {
 		delete_option( 'wss_index_backfill_state' );
 		delete_transient( 'wss_index_backfill_lock' );
 
+		// The background rebuild is a single scheduled event; without this
+		// the site keeps an orphaned cron entry that no code handles.
+		wp_clear_scheduled_hook( 'wss_index_backfill' );
+
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared
 		$names = $wpdb->get_col(
 			$wpdb->prepare(

@@ -5,10 +5,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 /**
  * Plugin updates through the native WordPress mechanism; source — GitHub
- * Releases of WSS_Config::UPDATER_REPO.
+ * Releases and tags of WSS_Config::UPDATER_REPO.
  *
- * The source of truth is a release tagged v2.3.0: WordPress sees the new
- * version, shows it under Plugins and updates from the release package.
+ * The source of truth is the highest version of the GitHub Release and the
+ * newest vX.Y.Z tag: WordPress sees the new version, shows it under Plugins
+ * and updates from the package of the winning source.
  * No third-party libraries and no write requests to the repository.
  */
 final class WSS_GitHub_Updater {
@@ -261,17 +262,31 @@ final class WSS_GitHub_Updater {
 	}
 
 	/**
-	 * Latest version data: the release first, otherwise the highest
-	 * vX.Y.Z tag. The tag fallback keeps updates working without a
-	 * manually created GitHub Release.
+	 * Latest version data: the highest version of both sources.
+	 *
+	 * Both sources are always queried (the winner is cached as a whole).
+	 * Taking the release and using the tag only when there is no release
+	 * hides a fresh tag behind an older GitHub Release: the repository
+	 * keeps release 1.6.3, the owner pushes tag 1.7.0, and the update is
+	 * never offered until a release is created by hand.
+	 *
+	 * Equal versions: the release wins, it carries the changelog.
 	 */
 	private function fetch_release(): ?array {
 		$release = $this->fetch_latest_release();
-		if ( $release !== null ) {
+		$tag     = $this->fetch_latest_tag();
+
+		if ( $release === null && $tag === null ) {
+			return null;
+		}
+		if ( $release === null ) {
+			return $tag;
+		}
+		if ( $tag === null ) {
 			return $release;
 		}
 
-		return $this->fetch_latest_tag();
+		return version_compare( $tag['version'], $release['version'], '>' ) ? $tag : $release;
 	}
 
 	private function fetch_latest_release(): ?array {
@@ -299,7 +314,8 @@ final class WSS_GitHub_Updater {
 	}
 
 	/**
-	 * Fallback without a GitHub Release: take the highest semver tag.
+	 * Highest semver tag of the repository. Competes with the release in
+	 * fetch_release(); a tag without a GitHub Release is a normal case.
 	 */
 	private function fetch_latest_tag(): ?array {
 		$tags = $this->api_get(

@@ -14,10 +14,18 @@ final class WSS_Admin_Page {
 
 	/**
 	 * Queues a links index rebuild from the admin screen.
+	 *
+	 * A manual rebuild is a site-wide action: the search page stays open to
+	 * authors, but starting the job requires the rebuild capability
+	 * (manage_options by default, filterable via wss_rebuild_capability).
 	 */
 	public function handle_index_rebuild(): void {
 		if ( ! WSS_Config::user_can_search() ) {
 			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), 403 );
+		}
+
+		if ( ! WSS_Config::user_can_rebuild() ) {
+			wp_die( esc_html__( 'Переиндексация доступна администратору сайта.', 'wp-smart-search' ), 403 );
 		}
 
 		check_admin_referer( 'wss_index_rebuild' );
@@ -223,18 +231,20 @@ final class WSS_Admin_Page {
 							<p class="wss-index-note"><?php esc_html_e( 'Переиндексация запущена в фоне.', 'wp-smart-search' ); ?></p>
 						<?php endif; ?>
 
-						<p class="wss-index-line">
-							<?php
-							echo esc_html(
-								sprintf(
-									/* translators: 1: number of indexed links, 2: number of posts */
-									__( 'Ссылок в индексе: %1$d, записей: %2$d', 'wp-smart-search' ),
-									(int) $index_status['links'],
-									(int) $index_status['posts']
-								)
-							);
-							?>
-						</p>
+						<?php if ( isset( $index_status['links'] ) ) : ?>
+							<p class="wss-index-line">
+								<?php
+								echo esc_html(
+									sprintf(
+										/* translators: 1: number of indexed links, 2: number of posts */
+										__( 'Ссылок в индексе: %1$d, записей: %2$d', 'wp-smart-search' ),
+										(int) $index_status['links'],
+										(int) $index_status['posts']
+									)
+								);
+								?>
+							</p>
+						<?php endif; ?>
 
 						<?php if ( ! $index_status['table'] ) : ?>
 							<p class="wss-index-note"><?php esc_html_e( 'Таблица индекса отсутствует — она будет создана автоматически.', 'wp-smart-search' ); ?></p>
@@ -254,11 +264,13 @@ final class WSS_Admin_Page {
 							</p>
 						<?php endif; ?>
 
-						<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-							<?php wp_nonce_field( 'wss_index_rebuild' ); ?>
-							<input type="hidden" name="action" value="wss_index_rebuild">
-							<button type="submit" class="wss-reset-btn"><?php esc_html_e( 'Переиндексировать ссылки', 'wp-smart-search' ); ?></button>
-						</form>
+						<?php if ( WSS_Config::user_can_rebuild() ) : ?>
+							<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+								<?php wp_nonce_field( 'wss_index_rebuild' ); ?>
+								<input type="hidden" name="action" value="wss_index_rebuild">
+								<button type="submit" class="wss-reset-btn"><?php esc_html_e( 'Переиндексировать ссылки', 'wp-smart-search' ); ?></button>
+							</form>
+						<?php endif; ?>
 					</div>
 
 					<div class="wss-filter-card">

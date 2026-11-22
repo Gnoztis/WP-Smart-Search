@@ -343,7 +343,11 @@ final class WSS_Rest_Controller {
 	 * unrelated URL containing it got a 401 from the init hook.
 	 */
 	private function requested_rest_route(): string {
-		$raw = trim( wp_unslash( (string) ( $_GET['rest_route'] ?? '' ) ) );
+		// Only a string is a route: `?rest_route[]=x` must not reach a
+		// string cast below (PHP would emit "Array to string conversion"
+		// on every such request, unauthenticated included).
+		$raw = isset( $_GET['rest_route'] ) ? wp_unslash( $_GET['rest_route'] ) : '';
+		$raw = is_string( $raw ) ? trim( $raw ) : '';
 		if ( $raw !== '' ) {
 			return '/' . ltrim( $raw, '/' );
 		}
@@ -728,10 +732,11 @@ final class WSS_Rest_Controller {
 	}
 
 	public function handle_me( WP_REST_Request $request ) {
-		$user  = wp_get_current_user();
-		$can   = current_user_can( WSS_Config::CAPABILITY );
-		$multi = current_user_can( 'edit_others_posts' );
-		$mode  = WSS_Config::visibility_mode();
+		$user         = wp_get_current_user();
+		$can          = current_user_can( WSS_Config::CAPABILITY );
+		$multi        = current_user_can( 'edit_others_posts' );
+		$all_statuses = WSS_Config::can_search_all_statuses();
+		$mode         = WSS_Config::visibility_mode();
 
 		return new WP_REST_Response( [
 			'id'                   => (int) $user->ID,
@@ -743,12 +748,16 @@ final class WSS_Rest_Controller {
 			// shared: posts of every author in these statuses are visible,
 			// which is what duplicate checks before publishing rely on.
 			'visibility_mode'      => $mode,
-			'visible_statuses'     => $multi
+			'visible_statuses'     => $all_statuses
 				? WSS_Config::ALLOWED_STATUSES
 				: ( 'shared' === $mode ? WSS_Config::SHARED_STATUSES : [ 'publish' ] ),
-			// Private posts stay with their author (and with editors).
-			'private_scope'        => $multi ? 'all' : 'own',
+			// Private posts stay with their author (and with editors that
+			// also have read_private_posts).
+			'private_scope'        => $all_statuses ? 'all' : 'own',
 			'max_per_page'         => WSS_Config::POSTS_PER_PAGE_MAX,
+			// A broader query stops at these many matched posts; the response
+			// then carries posts.truncated = true.
+			'max_matched_posts'    => WSS_Config::MAX_MATCHED_POSTS,
 			'max_words'            => WSS_Config::MAX_WORDS,
 			'max_query_len'        => WSS_Config::MAX_QUERY_LEN,
 			'batch_limit'          => WSS_Config::BATCH_MAX,

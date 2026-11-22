@@ -28,7 +28,9 @@ final class WSS_Cli {
 	 * @param array $assoc_args
 	 */
 	public function status( $args = [], $assoc_args = [] ): void {
-		$status = WSS_Index_Backfill::status();
+		// WP-CLI has no user, so the administrator-only counters are asked
+		// for explicitly.
+		$status = WSS_Index_Backfill::status( true );
 
 		\WP_CLI\Utils\format_items(
 			'table',

@@ -31,6 +31,17 @@ final class WSS_Config {
 	/** Max IDs in exclude/exclude_id — keeps the NOT IN (...) list bounded. */
 	public const MAX_EXCLUDE = 200;
 
+	/**
+	 * Max matched posts of one query. A two-letter query matches almost
+	 * every post, and the full list used to be built in memory; past this
+	 * cap the list is cut (posts.truncated = true) and `total` is counted
+	 * separately.
+	 */
+	public const MAX_MATCHED_POSTS = 10000;
+
+	/** Rows read per query while the match list is built, one batch at a time. */
+	public const MATCH_CHUNK_SIZE = 500;
+
 	public const MATCH_MODES = [ 'auto', 'fuzzy', 'exact' ];
 
 	/* ============================================================
@@ -51,7 +62,7 @@ final class WSS_Config {
 	public const TAGS_CACHE_TTL   = 86400;
 	public const TAGS_CACHE_VER   = 'v3'; // v3: morphology (word stems)
 	public const POSTS_CACHE_TTL  = 86400;
-	public const POSTS_CACHE_VER  = 'v12'; // v12: visibility mode in the key
+	public const POSTS_CACHE_VER  = 'v14'; // v14: truncated match list without post_content.
 	public const CACHE_GEN_OPTION = 'wss_cache_gen';
 
 	public const RATE_LIMIT_MAX = 120;
@@ -136,5 +147,44 @@ final class WSS_Config {
 
 	public static function user_can_search(): bool {
 		return is_user_logged_in() && current_user_can( self::CAPABILITY );
+	}
+
+	/**
+	 * Whether the current user may see posts of every author in every
+	 * status, private included.
+	 *
+	 * edit_others_posts alone is not enough for private posts: core hands
+	 * them over only to users with read_private_posts (the Editor and
+	 * Administrator roles have both). A custom role may have only the
+	 * first, and the search must not become a side channel around that.
+	 */
+	public static function can_search_all_statuses(): bool {
+		return current_user_can( 'edit_others_posts' ) && current_user_can( 'read_private_posts' );
+	}
+
+	/** Default capability for a manual rebuild — see rebuild_capability(). */
+	public const REBUILD_CAPABILITY = 'manage_options';
+
+	/**
+	 * Capability required to trigger a full links index rebuild by hand.
+	 *
+	 * A rebuild reads every post of the site and writes the whole index, so
+	 * it is an administrator action, not something any author with the
+	 * search capability may start. The filter hands it to a narrower or
+	 * wider role without a code change:
+	 *
+	 *     add_filter( 'wss_rebuild_capability', fn() => 'edit_others_posts' );
+	 *
+	 * The automatic rebuild (activation, empty index detected) runs without
+	 * a user and is not affected.
+	 */
+	public static function rebuild_capability(): string {
+		$cap = (string) apply_filters( 'wss_rebuild_capability', self::REBUILD_CAPABILITY );
+
+		return $cap !== '' ? $cap : self::REBUILD_CAPABILITY;
+	}
+
+	public static function user_can_rebuild(): bool {
+		return is_user_logged_in() && current_user_can( self::rebuild_capability() );
 	}
 }

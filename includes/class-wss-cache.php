@@ -162,6 +162,12 @@ final class WSS_Cache {
 	public function bump_generation(): void {
 		$value = (int) get_option( WSS_Config::CACHE_GEN_OPTION, 0 );
 		update_option( WSS_Config::CACHE_GEN_OPTION, $value + 1, true );
+
+		// A saved/deleted post changes the links index too, so the cached
+		// status snapshot must not outlive it.
+		if ( class_exists( 'WSS_Index_Backfill' ) ) {
+			WSS_Index_Backfill::flush_status();
+		}
 	}
 
 	public function maybe_bump_after_post_save( $post_id, $post = null, $update = null ): void {
@@ -224,7 +230,20 @@ final class WSS_Cache {
 
 	private static function redis_key( string $key ): string {
 		if ( self::$ns === null ) {
-			self::$ns = substr( md5( home_url( '/' ) ), 0, 12 );
+			global $wpdb;
+
+			// Site isolation: the namespace must differ for every install
+			// that reaches the same Redis server and database. home_url()
+			// alone is not enough — a staging clone keeps the production
+			// URL — so the database name and the table prefix are part of
+			// the hash as well. Cached search results differ per user
+			// (drafts, private posts), so a shared namespace would serve
+			// one site's rows to the other.
+			$site = home_url( '/' )
+				. '|' . ( defined( 'DB_NAME' ) ? (string) DB_NAME : '' )
+				. '|' . (string) $wpdb->prefix;
+
+			self::$ns = substr( md5( $site ), 0, 12 );
 		}
 		return 'wss:' . self::$ns . ':' . $key;
 	}
@@ -312,9 +331,15 @@ final class WSS_Cache {
 			}
 		}
 
-		$count = (int) get_transient( $key );
+		// Transients live in wp_options: keep the counter in the plugin
+		// namespace, otherwise a generic name like "rl:5" collides with
+		// another plugin's transient and uninstall.php (which sweeps
+		// _transient_wss_*) would leave it behind.
+		$transient = 'wss_' . $key;
+
+		$count = (int) get_transient( $transient );
 		$count++;
-		set_transient( $key, $count, $ttl );
+		set_transient( $transient, $count, $ttl );
 
 		return [ 'count' => $count, 'ttl' => $ttl ];
 	}
