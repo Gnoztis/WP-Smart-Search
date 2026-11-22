@@ -104,6 +104,12 @@ final class WSS_Config {
 	public const LINKS_TABLE_VER_OPTION = 'wss_links_table_ver';
 	public const LINKS_TABLE_VER        = 'v1';
 
+	/** When the table existence was last verified (autoloaded option). */
+	public const LINKS_TABLE_CHECK_OPTION = 'wss_links_table_check';
+
+	/** How often the table existence is re-verified, seconds. */
+	public const LINKS_TABLE_CHECK_TTL = 3600;
+
 	public const LINK_CONTEXT_CHARS = 100;   // chars left/right of the tag
 	public const LINK_ANCHOR_MAX    = 500;   // anchor truncation
 	public const LINK_CONTEXT_MAX   = 400;   // context truncation

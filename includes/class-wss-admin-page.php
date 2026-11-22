@@ -9,6 +9,31 @@ final class WSS_Admin_Page {
 		add_action( 'admin_menu',            [ $this, 'register_menu' ] );
 		add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_assets' ] );
 		add_filter( 'admin_body_class',      [ $this, 'add_body_class' ] );
+		add_action( 'admin_post_wss_index_rebuild', [ $this, 'handle_index_rebuild' ] );
+	}
+
+	/**
+	 * Queues a links index rebuild from the admin screen.
+	 */
+	public function handle_index_rebuild(): void {
+		if ( ! WSS_Config::user_can_search() ) {
+			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), 403 );
+		}
+
+		check_admin_referer( 'wss_index_rebuild' );
+
+		WSS_Index_Backfill::start();
+
+		wp_safe_redirect(
+			add_query_arg(
+				[
+					'page'        => WSS_Config::PAGE_SLUG,
+					'wss_reindex' => '1',
+				],
+				admin_url( 'edit.php' )
+			)
+		);
+		exit;
 	}
 
 	public function register_menu(): void {
@@ -190,6 +215,52 @@ final class WSS_Admin_Page {
 				</div>
 
 				<aside class="wss-sidebar">
+					<?php $index_status = WSS_Index_Backfill::status(); ?>
+					<div class="wss-filter-card">
+						<h3 class="wss-filter-title"><?php esc_html_e( 'Индекс ссылок', 'wp-smart-search' ); ?></h3>
+
+						<?php if ( isset( $_GET['wss_reindex'] ) ) : ?>
+							<p class="wss-index-note"><?php esc_html_e( 'Переиндексация запущена в фоне.', 'wp-smart-search' ); ?></p>
+						<?php endif; ?>
+
+						<p class="wss-index-line">
+							<?php
+							echo esc_html(
+								sprintf(
+									/* translators: 1: number of indexed links, 2: number of posts */
+									__( 'Ссылок в индексе: %1$d, записей: %2$d', 'wp-smart-search' ),
+									(int) $index_status['links'],
+									(int) $index_status['posts']
+								)
+							);
+							?>
+						</p>
+
+						<?php if ( ! $index_status['table'] ) : ?>
+							<p class="wss-index-note"><?php esc_html_e( 'Таблица индекса отсутствует — она будет создана автоматически.', 'wp-smart-search' ); ?></p>
+						<?php endif; ?>
+
+						<?php if ( ! $index_status['done'] ) : ?>
+							<p class="wss-index-line">
+								<?php
+								echo esc_html(
+									sprintf(
+										/* translators: %d: number of processed posts */
+										__( 'Переиндексация выполняется: обработано %d записей', 'wp-smart-search' ),
+										(int) $index_status['processed']
+									)
+								);
+								?>
+							</p>
+						<?php endif; ?>
+
+						<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+							<?php wp_nonce_field( 'wss_index_rebuild' ); ?>
+							<input type="hidden" name="action" value="wss_index_rebuild">
+							<button type="submit" class="wss-reset-btn"><?php esc_html_e( 'Переиндексировать ссылки', 'wp-smart-search' ); ?></button>
+						</form>
+					</div>
+
 					<div class="wss-filter-card">
 						<h3 class="wss-filter-title"><?php esc_html_e( 'Фильтры', 'wp-smart-search' ); ?></h3>
 

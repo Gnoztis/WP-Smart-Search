@@ -54,12 +54,96 @@ final class WSS_Links_Indexer {
 		update_option( WSS_Config::LINKS_TABLE_VER_OPTION, WSS_Config::LINKS_TABLE_VER, true );
 	}
 
+	/**
+	 * Table name including the site prefix.
+	 */
+	public static function table(): string {
+		global $wpdb;
+		return $wpdb->prefix . WSS_Config::LINKS_TABLE;
+	}
+
+	/**
+	 * Whether the index table really exists.
+	 *
+	 * The version option alone is not proof: a table can be dropped by a
+	 * migration, an uninstall or a database restore while the option stays
+	 * behind. Without this check the plugin silently answers "no links".
+	 */
+	public static function table_exists(): bool {
+		global $wpdb;
+
+		$table = self::table();
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+		$found = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+
+		return is_string( $found ) && $found === $table;
+	}
+
+	/**
+	 * Rows in the index.
+	 */
+	public static function count_rows(): int {
+		global $wpdb;
+
+		if ( ! self::table_exists() ) {
+			return 0;
+		}
+
+		$table = self::table();
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+		return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" ); // phpcs:ignore -- a table name cannot be a placeholder.
+	}
+
+	/**
+	 * Posts that belong in the index: every status the search can return.
+	 * Visibility is enforced at query time, so indexing private posts too
+	 * keeps the index consistent with what save_post writes.
+	 */
+	public static function count_posts(): int {
+		global $wpdb;
+
+		$statuses = WSS_Config::ALLOWED_STATUSES;
+		$ph       = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->posts}
+				WHERE post_type = 'post' AND post_status IN ({$ph})",
+				$statuses
+			)
+		);
+	}
+
+	/**
+	 * Installs or repairs the table and records the schema version.
+	 *
+	 * The existence check is cached for an hour: it costs one query per
+	 * hour per site instead of one per request, while a dropped table is
+	 * still repaired within the hour (and immediately on activation).
+	 */
 	public function maybe_install(): void {
 		$current = (string) get_option( WSS_Config::LINKS_TABLE_VER_OPTION, '' );
+
 		if ( $current === WSS_Config::LINKS_TABLE_VER ) {
-			return;
+			$checked = (int) get_option( WSS_Config::LINKS_TABLE_CHECK_OPTION, 0 );
+			if ( $checked > ( time() - WSS_Config::LINKS_TABLE_CHECK_TTL ) ) {
+				return;
+			}
+			if ( self::table_exists() ) {
+				update_option( WSS_Config::LINKS_TABLE_CHECK_OPTION, time(), true );
+				return;
+			}
 		}
+
 		self::install_table();
+		update_option( WSS_Config::LINKS_TABLE_CHECK_OPTION, time(), true );
+
+		// The table was missing or had another schema: whatever rows it had
+		// are not trustworthy, so queue a rebuild.
+		if ( class_exists( 'WSS_Index_Backfill' ) ) {
+			WSS_Index_Backfill::start();
+		}
 	}
 
 	/* ============================================================
@@ -111,31 +195,105 @@ final class WSS_Links_Indexer {
 	 *  Index / delete
 	 * ============================================================ */
 
-	public function reindex( WP_Post $post ): void {
+	/**
+	 * Rewrites the index rows of a single post.
+	 *
+	 * The operation is a diff, not wipe-and-insert: rows for links that
+	 * disappeared are deleted, links that are still there are upserted, so
+	 * a crash half way through never leaves the post without links and a
+	 * repeated run produces the same result (idempotent).
+	 *
+	 * @return bool False when a database write failed.
+	 */
+	public function reindex( WP_Post $post ): bool {
 		global $wpdb;
-		$table = $wpdb->prefix . WSS_Config::LINKS_TABLE;
+		$table = $this->table();
 
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
-		$wpdb->delete( $table, [ 'post_id' => $post->ID ], [ '%d' ] );
+		$rows = $this->build_rows( $post );
 
+		/* ---------- 1. drop links that are no longer in the content ---------- */
+
+		$hashes = array_keys( $rows );
+
+		if ( empty( $hashes ) ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+			$wpdb->delete( $table, [ 'post_id' => $post->ID ], [ '%d' ] );
+		} else {
+			foreach ( array_chunk( $hashes, 500 ) as $chunk ) {
+				$ph     = implode( ',', array_fill( 0, count( $chunk ), '%s' ) );
+				$params = array_merge( [ $post->ID ], $chunk );
+				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+				$wpdb->query(
+					$wpdb->prepare(
+						"DELETE FROM {$table} WHERE post_id = %d AND url_hash NOT IN ({$ph})",
+						$params
+					)
+				);
+			}
+		}
+
+		if ( empty( $rows ) ) {
+			return $wpdb->last_error === '';
+		}
+
+		/* ---------- 2. upsert current links ---------- */
+
+		$ok = true;
+
+		foreach ( $rows as $row ) {
+			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+			$result = $wpdb->query(
+				$wpdb->prepare(
+					"INSERT INTO {$table}
+						(post_id, url, url_hash, url_norm, url_norm_hash, scheme, host, domain, path, anchor, context, created_at)
+					VALUES (%d, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+					ON DUPLICATE KEY UPDATE
+						url = VALUES(url),
+						url_norm = VALUES(url_norm),
+						url_norm_hash = VALUES(url_norm_hash),
+						scheme = VALUES(scheme),
+						host = VALUES(host),
+						domain = VALUES(domain),
+						path = VALUES(path),
+						anchor = VALUES(anchor),
+						context = VALUES(context)",
+					array_merge( array_values( $row ), [ current_time( 'mysql', true ) ] )
+				)
+			);
+
+			if ( false === $result ) {
+				$ok = false;
+			}
+		}
+
+		return $ok;
+	}
+
+	/**
+	 * Normalised rows for the links of a post, keyed by url_hash.
+	 *
+	 * @return array<string,array<int,mixed>>
+	 */
+	private function build_rows( WP_Post $post ): array {
 		$content = (string) $post->post_content;
 		if ( $content === '' || stripos( $content, '<a ' ) === false ) {
-			return;
+			return [];
 		}
 
 		$links = $this->extract_links( $content );
 		if ( empty( $links ) ) {
-			return;
+			return [];
 		}
 
-		$seen = [];
+		$rows = [];
+
 		foreach ( $links as $link ) {
-			$raw = $link['url'];
+			$raw  = (string) $link['url'];
 			$hash = md5( $raw );
-			if ( isset( $seen[ $hash ] ) ) {
+
+			if ( isset( $rows[ $hash ] ) ) {
 				continue;
 			}
-			$seen[ $hash ] = true;
 
 			$parts = wp_parse_url( $raw );
 			if ( ! is_array( $parts ) || empty( $parts['host'] ) ) {
@@ -151,22 +309,22 @@ final class WSS_Links_Indexer {
 			$norm      = WSS_Refang::normalize_url( $raw );
 			$norm_hash = $norm !== '' ? md5( $norm ) : '';
 
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
-			$wpdb->insert( $table, [
-				'post_id'       => $post->ID,
-				'url'           => $raw,
-				'url_hash'      => $hash,
-				'url_norm'      => $norm,
-				'url_norm_hash' => $norm_hash,
-				'scheme'        => $scheme,
-				'host'          => $host,
-				'domain'        => $domain,
-				'path'          => $path,
-				'anchor'        => $link['anchor'],
-				'context'       => $link['context'],
-				'created_at'    => current_time( 'mysql', true ),
-			], [ '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s' ] );
+			$rows[ $hash ] = [
+				(int) $post->ID,
+				$raw,
+				$hash,
+				$norm,
+				$norm_hash,
+				$scheme,
+				$host,
+				$domain,
+				$path,
+				(string) $link['anchor'],
+				(string) $link['context'],
+			];
 		}
+
+		return $rows;
 	}
 
 	public function delete_post( int $post_id ): void {

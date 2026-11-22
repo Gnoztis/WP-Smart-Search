@@ -44,8 +44,11 @@ final class WSS_Rest_Controller {
 			'args'                => $this->batch_args(),
 		] );
 
+		// GET and POST: clients that send every call as POST (GET responses
+		// may be cached by a reverse proxy in front of the site) must not get
+		// a 404 from WordPress, which is what a method mismatch returns.
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/me', [
-			'methods'             => 'GET',
+			'methods'             => [ 'GET', 'POST' ],
 			'callback'            => [ $this, 'handle_me' ],
 			'permission_callback' => [ $this, 'permission_check' ],
 		] );
@@ -152,7 +155,7 @@ final class WSS_Rest_Controller {
 
 		if ( strtoupper( (string) $request->get_method() ) === 'OPTIONS' ) {
 			$response = new WP_REST_Response( null, 200 );
-			$response->header( 'Allow', 'GET, POST, OPTIONS' );
+			$response->header( 'Allow', $this->allowed_methods( (string) $request->get_route() ) );
 			return $response;
 		}
 
@@ -233,7 +236,29 @@ final class WSS_Rest_Controller {
 		}
 
 		$response->header( 'Content-Type', 'application/json; charset=UTF-8' );
+
+		// Search results depend on the authenticated user (drafts, private
+		// posts), so no shared cache may store them: a reverse proxy that
+		// caches GET /wp-json/wss/v1/* would serve one author's drafts to
+		// another user. Vary makes the cache key user-specific anyway.
+		$response->header( 'Cache-Control', 'no-store, no-cache, must-revalidate, private' );
+		$response->header( 'Pragma', 'no-cache' );
+		$response->header( 'Vary', 'Authorization' );
+
 		return $response;
+	}
+
+	/**
+	 * Allow header for an OPTIONS preflight, per route.
+	 */
+	private function allowed_methods( string $route ): string {
+		$route = rtrim( $route, '/' );
+
+		if ( substr( $route, -12 ) === '/links/batch' ) {
+			return 'POST, OPTIONS';
+		}
+
+		return 'GET, POST, OPTIONS';
 	}
 
 	/* ============================================================
@@ -733,6 +758,9 @@ final class WSS_Rest_Controller {
 			'api_version'          => 'v1',
 			// redis | none — see WSS_Cache::backend().
 			'cache_backend'        => WSS_Cache::backend(),
+			// Links index health: an empty index with existing posts means
+			// the data was lost and a rebuild is queued.
+			'index'                => WSS_Index_Backfill::status(),
 			'match_modes'          => WSS_Config::MATCH_MODES,
 			'scopes'               => WSS_Config::SCOPES,
 		], 200 );

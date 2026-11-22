@@ -25,8 +25,11 @@ if ( ! function_exists( 'wss_uninstall_site' ) ) {
 		$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" ); // phpcs:ignore -- a table name cannot be a prepare() placeholder.
 
 		delete_option( 'wss_links_table_ver' );
+		delete_option( 'wss_links_table_check' );
 		delete_option( 'wss_cache_gen' );
 		delete_option( 'wss_redis_down_until' );
+		delete_option( 'wss_index_backfill_state' );
+		delete_transient( 'wss_index_backfill_lock' );
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared
 		$names = $wpdb->get_col(
