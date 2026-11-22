@@ -19,12 +19,28 @@ final class WSS_GitHub_Updater {
 
 	private static ?array $header = null;
 
+	/**
+	 * Explicit user action, not a scheduled check: must not be answered from
+	 * the error backoff, which otherwise hides the fact that no request was
+	 * made at all.
+	 */
+	private static bool $force = false;
+
+	/**
+	 * Failure of the request in flight: ['code' => int, 'reason' => string,
+	 * 'at' => int]. The reason vocabulary lives in error_reason().
+	 *
+	 * @var array{code:int,reason:string,at:int}|null
+	 */
+	private ?array $last_error = null;
+
 	public function register_hooks(): void {
 		add_filter( 'pre_set_site_transient_update_plugins', [ $this, 'inject_update' ] );
 		add_filter( 'plugins_api',                           [ $this, 'plugin_info' ], 10, 3 );
 		add_filter( 'upgrader_source_selection',             [ $this, 'rename_source' ], 10, 4 );
 		add_action( 'upgrader_process_complete',             [ $this, 'after_upgrade' ], 10, 2 );
 		add_action( 'load-plugins.php',                      [ $this, 'maybe_force_check' ] );
+		add_action( 'admin_notices',                         [ $this, 'admin_notices' ] );
 		add_filter( 'plugin_action_links_' . self::basename(), [ $this, 'action_links' ] );
 	}
 
@@ -329,17 +345,20 @@ final class WSS_GitHub_Updater {
 	 * update_plugins transient holds for our main file — including the key
 	 * it sits under, which is where a mismatch shows up.
 	 *
-	 * @return array{plugin_basename:string,transient_entry:bool,transient_key:string,new_version:string,package:string}
+	 * @return array{plugin_basename:string,transient_entry:bool,transient_key:string,new_version:string,package:string,last_error:array{code:int,reason:string,at:int}|null,next_retry_in:int,token_configured:bool}
 	 */
 	public static function diagnostic(): array {
 		$basename = self::basename();
 
 		$out = [
-			'plugin_basename' => $basename,
-			'transient_entry' => false,
-			'transient_key'   => '',
-			'new_version'     => '',
-			'package'         => '',
+			'plugin_basename'  => $basename,
+			'transient_entry'  => false,
+			'transient_key'    => '',
+			'new_version'      => '',
+			'package'          => '',
+			'last_error'       => self::saved_error(),
+			'next_retry_in'    => self::retry_in(),
+			'token_configured' => '' !== self::token(),
 		];
 
 		$transient = get_site_transient( 'update_plugins' );
@@ -399,9 +418,48 @@ final class WSS_GitHub_Updater {
 		);
 
 		$links = (array) $links;
+
+		// The last check failed: say so, otherwise "no update" and "the check
+		// crashed" look exactly the same in the plugin row.
+		$error = self::saved_error();
+		if ( null !== $error ) {
+			$links['wss_state'] = '<span class="wss-check-failed" style="color:#b32d2e">'
+				. esc_html( self::error_label( $error ) )
+				. '</span>';
+		}
+
 		$links['wss_check'] = '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Проверить обновления', 'wp-smart-search' ) . '</a>';
 
 		return $links;
+	}
+
+	/**
+	 * Explains a failed check on the Plugins screen.
+	 *
+	 * Without it the failure is invisible: WordPress only shows "no updates",
+	 * and an exhausted GitHub quota looks like a plugin without releases.
+	 */
+	public function admin_notices(): void {
+		if ( ! current_user_can( 'update_plugins' ) ) {
+			return;
+		}
+
+		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+		if ( ! $screen || 'plugins' !== $screen->id ) {
+			return;
+		}
+
+		$error = self::saved_error();
+		if ( null === $error ) {
+			return;
+		}
+
+		printf(
+			'<div class="notice notice-warning"><p><strong>%s</strong> %s %s</p></div>',
+			esc_html__( 'WP Smart Search: проверка обновлений не удалась.', 'wp-smart-search' ),
+			esc_html( self::error_label( $error ) . '.' ),
+			esc_html( self::error_hint( $error ) )
+		);
 	}
 
 	/**
@@ -415,6 +473,10 @@ final class WSS_GitHub_Updater {
 			return;
 		}
 		check_admin_referer( 'wss_force_check' );
+
+		// The click is an explicit request for a fresh check: ignore and drop
+		// the error backoff, then flush the caches and ask GitHub again.
+		self::$force = true;
 
 		$this->flush();
 
@@ -454,17 +516,29 @@ final class WSS_GitHub_Updater {
 			return $cached;
 		}
 
-		if ( get_transient( self::ERROR_TRANSIENT ) ) {
+		// An explicit force-check is not answered from the backoff: the user
+		// asked for a request, and a cached failure must not fake an answer.
+		if ( ! self::$force && null !== self::saved_error() ) {
 			return null;
 		}
 
-		$release = $this->fetch_release();
+		$this->last_error = null;
+		$release          = $this->fetch_release();
 
 		if ( $release === null ) {
-			set_transient( self::ERROR_TRANSIENT, 1, WSS_Config::UPDATER_ERROR_TTL );
+			$error = $this->last_error ?? [
+				'code'   => 404,
+				'reason' => 'not_found',
+				'at'     => time(),
+			];
+
+			set_transient( self::ERROR_TRANSIENT, $error, WSS_Config::UPDATER_ERROR_TTL );
+
 			return null;
 		}
 
+		// A success clears the backoff: the next scheduled check may run again.
+		delete_transient( self::ERROR_TRANSIENT );
 		set_transient( self::TRANSIENT, $release, WSS_Config::UPDATER_CACHE_TTL );
 
 		return $release;
@@ -642,10 +716,18 @@ final class WSS_GitHub_Updater {
 	/**
 	 * GET to the GitHub API with our User-Agent and an optional token.
 	 *
+	 * Failures are recorded in $last_error instead of being flattened to null:
+	 * a 403 rate limit, a 404 tag and a dead network need different advice.
+	 * A 404 is deliberately not recorded — for releases/latest "no release"
+	 * is a normal answer and the tag list may still provide the update.
+	 *
 	 * @return array<string,mixed>|null
 	 */
 	private function api_get( string $url ): ?array {
-		$args = [
+		// The token is attached only to GitHub hosts: the URL comes from the
+		// repository constant, never from user input.
+		$host  = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+		$args  = [
 			'timeout'     => 5,
 			'redirection' => 2,
 			'headers'     => [
@@ -655,24 +737,174 @@ final class WSS_GitHub_Updater {
 			],
 		];
 
-		$token = $this->token();
-		if ( $token !== '' ) {
+		$token = self::token();
+		if ( '' !== $token && ( 'api.github.com' === $host || 'github.com' === $host ) ) {
 			$args['headers']['Authorization'] = 'Bearer ' . $token;
 		}
 
 		// The URL is built from the repository constant, not from user
 		// input; scheme and host of the answer are validated separately.
 		$response = wp_remote_get( $url, $args ); // phpcs:ignore -- URL built from the repository constant; scheme and host are validated below.
+
 		if ( is_wp_error( $response ) ) {
+			$this->last_error = [
+				'code'   => 0,
+				'reason' => 'network',
+				'at'     => time(),
+			];
 			return null;
 		}
-		if ( 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+
+		$code = (int) wp_remote_retrieve_response_code( $response );
+
+		if ( 200 !== $code ) {
+			if ( 404 !== $code ) {
+				$this->last_error = [
+					'code'   => $code,
+					'reason' => self::error_reason( $code, $response ),
+					'at'     => time(),
+				];
+			}
 			return null;
 		}
 
 		$body = json_decode( (string) wp_remote_retrieve_body( $response ), true );
 
-		return is_array( $body ) ? $body : null;
+		if ( ! is_array( $body ) ) {
+			$this->last_error = [
+				'code'   => $code,
+				'reason' => 'invalid',
+				'at'     => time(),
+			];
+			return null;
+		}
+
+		return $body;
+	}
+
+	/**
+	 * Why the request failed, in the vocabulary used by the admin notice.
+	 *
+	 * @param int              $code     HTTP status.
+	 * @param array<string,mixed>|WP_Error $response Raw response.
+	 */
+	private static function error_reason( int $code, $response ): string {
+		if ( 429 === $code ) {
+			return 'rate_limit';
+		}
+
+		if ( 403 === $code ) {
+			// GitHub reports an exhausted quota as a 403 with a zero
+			// remaining counter; a plain 403 means the token lacks access.
+			$remaining = '';
+			if ( ! is_wp_error( $response ) ) {
+				$remaining = (string) wp_remote_retrieve_header( $response, 'x-ratelimit-remaining' );
+			}
+
+			return '' === trim( $remaining ) || '0' === trim( $remaining ) ? 'rate_limit' : 'unauthorized';
+		}
+
+		if ( 404 === $code ) {
+			return 'not_found';
+		}
+
+		if ( 401 === $code ) {
+			return 'unauthorized';
+		}
+
+		return 'invalid';
+	}
+
+	/**
+	 * Saved failure of the last check, or null when the last check succeeded.
+	 *
+	 * Before 2.6.2 this transient held a bare `1`, so a rate limit, a missing
+	 * tag and a dead network were indistinguishable. An old-style value may
+	 * still be in the cache right after the upgrade; it is reported as
+	 * "unknown" rather than ignored.
+	 *
+	 * @return array{code:int,reason:string,at:int}|null
+	 */
+	private static function saved_error(): ?array {
+		$error = get_transient( self::ERROR_TRANSIENT );
+
+		if ( is_array( $error ) && isset( $error['reason'] ) ) {
+			return [
+				'code'   => (int) ( $error['code'] ?? 0 ),
+				'reason' => (string) $error['reason'],
+				'at'     => (int) ( $error['at'] ?? 0 ),
+			];
+		}
+
+		if ( $error ) {
+			return [
+				'code'   => 0,
+				'reason' => 'unknown',
+				'at'     => 0,
+			];
+		}
+
+		return null;
+	}
+
+	/**
+	 * Seconds until the failed check may be retried; 0 when there is none.
+	 */
+	private static function retry_in(): int {
+		$error = self::saved_error();
+
+		if ( null === $error || $error['at'] <= 0 ) {
+			return 0;
+		}
+
+		return max( 0, $error['at'] + (int) WSS_Config::UPDATER_ERROR_TTL - time() );
+	}
+
+	/**
+	 * Human readable form of a failure, e.g. "проверка не удалась: 403
+	 * (лимит GitHub API)".
+	 *
+	 * @param array{code:int,reason:string,at:int} $error
+	 */
+	private static function error_label( array $error ): string {
+		$reasons = [
+			'rate_limit'   => __( 'лимит GitHub API', 'wp-smart-search' ),
+			'not_found'    => __( 'репозиторий или тег не найдены', 'wp-smart-search' ),
+			'unauthorized' => __( 'токен отклонён', 'wp-smart-search' ),
+			'network'      => __( 'нет связи с GitHub', 'wp-smart-search' ),
+			'invalid'      => __( 'неожиданный ответ GitHub', 'wp-smart-search' ),
+			'unknown'      => __( 'неизвестная ошибка', 'wp-smart-search' ),
+		];
+
+		$reason = $reasons[ $error['reason'] ] ?? $reasons['unknown'];
+		$code   = $error['code'] > 0 ? (string) $error['code'] : '—';
+
+		return sprintf(
+			/* translators: 1: HTTP status or a dash, 2: failure reason */
+			__( 'проверка не удалась: %1$s (%2$s)', 'wp-smart-search' ),
+			$code,
+			$reason
+		);
+	}
+
+	/**
+	 * What to do about a failure.
+	 *
+	 * @param array{code:int,reason:string,at:int} $error
+	 */
+	private static function error_hint( array $error ): string {
+		switch ( $error['reason'] ) {
+			case 'rate_limit':
+				return __( 'Задайте WSS_GITHUB_TOKEN в wp-config.php: без токена GitHub разрешает 60 запросов в час на IP, с токеном — 5000.', 'wp-smart-search' );
+			case 'not_found':
+				return __( 'Проверьте, что тег вида vX.Y.Z существует в репозитории и репозиторий доступен без авторизации.', 'wp-smart-search' );
+			case 'unauthorized':
+				return __( 'Проверьте WSS_GITHUB_TOKEN: токен должен иметь доступ на чтение публичного репозитория.', 'wp-smart-search' );
+			case 'network':
+				return __( 'Хостинг не смог открыть api.github.com: проверьте исходящие запросы и DNS.', 'wp-smart-search' );
+			default:
+				return __( 'Повторите проверку позже; если ошибка повторяется, посмотрите ответ api.github.com.', 'wp-smart-search' );
+		}
 	}
 
 	/**
@@ -737,7 +969,15 @@ final class WSS_GitHub_Updater {
 		return $m[1];
 	}
 
-	private function token(): string {
+	/**
+	 * Personal access token for the GitHub API, if the site provides one.
+	 *
+	 * Optional: a public repository needs no token, but the anonymous quota is
+	 * 60 requests per hour per IP, and several plugins behind one hosting IP
+	 * exhaust it. The value is never printed — diagnostic() only reports
+	 * whether it is configured.
+	 */
+	private static function token(): string {
 		$token = defined( 'WSS_GITHUB_TOKEN' ) ? (string) WSS_GITHUB_TOKEN : '';
 		$token = (string) apply_filters( 'wss_github_token', $token );
 		return trim( $token );

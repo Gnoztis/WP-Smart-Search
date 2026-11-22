@@ -1095,7 +1095,7 @@ final class WSS_Admin_Page {
 			[ 'link_fields, required_link_fields', 'array', __( 'Допустимые поля links.items и те, что возвращаются всегда.', 'wp-smart-search' ) ],
 			[ 'cache_backend', 'string', __( 'redis или none — активный бэкенд кэша.', 'wp-smart-search' ) ],
 			[ 'index', 'object', __( 'Состояние индекса ссылок: table, done, cursor, processed, errors (счётчики links/posts — только администратору).', 'wp-smart-search' ) ],
-			[ 'update', 'object', __( 'Диагностика обновления: plugin_basename, transient_entry, transient_key, new_version, package.', 'wp-smart-search' ) ],
+			[ 'update', 'object', __( 'Диагностика обновления: plugin_basename, transient_entry, transient_key, new_version, package, last_error (code, reason, at), next_retry_in, token_configured.', 'wp-smart-search' ) ],
 			[ 'match_modes, scopes', 'array', __( 'Допустимые значения параметров match и scope.', 'wp-smart-search' ) ],
 			[ 'plugin_version, api_version', 'string', __( 'Версия плагина и версия API.', 'wp-smart-search' ) ],
 		];

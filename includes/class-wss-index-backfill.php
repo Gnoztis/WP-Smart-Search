@@ -52,6 +52,9 @@ final class WSS_Index_Backfill {
 	/** Option holding the browser-runner marker. */
 	public const RUNNER_OPTION = 'wss_index_runner';
 
+	/** Marker saying the one-time autoload repair already ran for a version. */
+	private const AUTOLOAD_FIX_OPTION = 'wss_index_autoload_fixed';
+
 	/** How long the browser marker stays fresh, seconds. */
 	private const RUNNER_TTL = 300;
 
@@ -64,6 +67,7 @@ final class WSS_Index_Backfill {
 	public function register_hooks(): void {
 		add_action( self::HOOK, [ $this, 'run' ] );
 		add_action( 'init', [ $this, 'maybe_activate' ], 20 );
+		add_action( 'init', [ __CLASS__, 'maybe_fix_autoload' ], 5 );
 	}
 
 	/* ============================================================
@@ -84,11 +88,29 @@ final class WSS_Index_Backfill {
 			'index_version' => '',
 		];
 
-		// Read the row directly. get_option() may serve a stale copy from the
-		// alloptions cache (a persistent object cache keeps it across requests,
-		// and the compare-and-swap below bypasses update_option(), so the cache
-		// is not refreshed by it). A stale cursor made every browser step compare
-		// against an old value, lose the swap and report "skipped" forever.
+		$raw = self::option_row();
+
+		if ( null === $raw ) {
+			return $defaults;
+		}
+
+		$state = maybe_unserialize( $raw );
+
+		return is_array( $state ) ? array_merge( $defaults, $state ) : $defaults;
+	}
+
+	/**
+	 * Serialized state row, read straight from the table.
+	 *
+	 * The compare-and-swap writes the row with SQL, so every read that must
+	 * agree with it has to bypass the object cache: get_option() may serve a
+	 * stale alloptions copy, and that is exactly how the cursor stalled in
+	 * 2.6.0 (the swap compared an advanced row against a cached old cursor,
+	 * lost, and answered "skipped" on every step).
+	 *
+	 * @return string|null Serialized value, or null when the row is missing.
+	 */
+	private static function option_row(): ?string {
 		global $wpdb;
 
 		$raw = $wpdb->get_var(
@@ -98,13 +120,7 @@ final class WSS_Index_Backfill {
 			)
 		);
 
-		if ( null === $raw ) {
-			return $defaults;
-		}
-
-		$state = maybe_unserialize( $raw );
-
-		return is_array( $state ) ? array_merge( $defaults, $state ) : $defaults;
+		return null === $raw ? null : (string) $raw;
 	}
 
 	/**
@@ -119,8 +135,8 @@ final class WSS_Index_Backfill {
 	private static function save_state( array $state, bool $flush = true ): void {
 		// Never autoloaded: the cursor is large, changes on every batch and must
 		// not be frozen into the alloptions cache that the compare-and-swap
-		// bypasses.
-		add_option( self::OPTION, [], '', 'no' );
+		// bypasses. update_option() creates a missing row and, with an explicit
+		// flag, also downgrades a row left autoloaded by 2.6.0.
 		update_option( self::OPTION, $state, false );
 
 		self::forget_option_cache();
@@ -139,12 +155,12 @@ final class WSS_Index_Backfill {
 	 *                       also run in the background.
 	 */
 	public static function start( bool $schedule = true ): void {
-		$option = get_option( self::OPTION, [] );
-		$state  = is_array( $option ) ? $option : [];
+		$state = self::state();
 
 		// A job that is still running keeps its cursor; only a finished or
-		// absent one is reset.
-		if ( ! empty( $state['done'] ) || ! isset( $state['cursor'] ) || empty( $state['started'] ) ) {
+		// absent one is reset. state() reads the row, not the cache: a stale
+		// copy must not reset a run that is already halfway through.
+		if ( ! empty( $state['done'] ) || empty( $state['started'] ) ) {
 			self::save_state( [
 				'done'          => false,
 				'cursor'        => 0,
@@ -240,9 +256,12 @@ final class WSS_Index_Backfill {
 			return;
 		}
 
-		$state = get_option( self::OPTION, null );
+		// Existence is a property of the row, not of the option cache: a stale
+		// "notoptions"/alloptions entry would make this run on every request.
+		$exists = null !== self::option_row();
 
-		if ( is_array( $state ) ) {
+		if ( $exists ) {
+			$state = self::state();
 			if ( empty( $state['done'] ) ) {
 				wp_schedule_single_event( time() + self::SCHEDULE_DELAY, self::HOOK );
 			}
@@ -469,12 +488,7 @@ final class WSS_Index_Backfill {
 	private function advance_cursor( int $old_cursor, array $state ): bool {
 		global $wpdb;
 
-		$raw = $wpdb->get_var(
-			$wpdb->prepare(
-				"SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
-				self::OPTION
-			)
-		);
+		$raw = self::option_row();
 
 		if ( null === $raw ) {
 			// No row yet: create it without autoload so it never lands in the
@@ -484,7 +498,7 @@ final class WSS_Index_Backfill {
 				[
 					'option_name'  => self::OPTION,
 					'option_value' => maybe_serialize( $state ),
-					'autoload'     => 'no',
+					'autoload'     => 'off',
 				],
 				[ '%s', '%s', '%s' ]
 			);
@@ -523,8 +537,46 @@ final class WSS_Index_Backfill {
 	 */
 	private static function forget_option_cache(): void {
 		wp_cache_delete( self::OPTION, 'options' );
-		wp_cache_delete( self::OPTION, 'notoptions' );
+		wp_cache_delete( 'notoptions', 'options' );
 		wp_cache_delete( 'alloptions', 'options' );
+	}
+
+	/**
+	 * One-time autoload repair for sites that ran 2.6.0.
+	 *
+	 * 2.6.0 created the state option autoloaded, so a persistent object cache
+	 * served a stale cursor from the alloptions bucket. The save path now writes
+	 * the flag as off, but the row may sit untouched until the next batch while
+	 * other code reads it through get_option(). The check costs one cached
+	 * option read and rewrites nothing after the first run per version.
+	 */
+	public static function maybe_fix_autoload(): void {
+		if ( WSS_VERSION === get_option( self::AUTOLOAD_FIX_OPTION ) ) {
+			return;
+		}
+
+		global $wpdb;
+
+		$autoload = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT autoload FROM {$wpdb->options} WHERE option_name = %s",
+				self::OPTION
+			)
+		);
+
+		if ( null !== $autoload && ! in_array( (string) $autoload, [ 'off', 'no' ], true ) ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.PreparedSQL.NotPrepared
+			$wpdb->query(
+				$wpdb->prepare(
+					"UPDATE {$wpdb->options} SET autoload = 'off' WHERE option_name = %s",
+					self::OPTION
+				)
+			);
+
+			self::forget_option_cache();
+		}
+
+		update_option( self::AUTOLOAD_FIX_OPTION, WSS_VERSION, true );
 	}
 
 	/**
