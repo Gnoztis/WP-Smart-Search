@@ -409,6 +409,28 @@
 	margin: 0 8px 0 0;
 }
 
+/* Destructive action: recreate the index table from scratch. */
+.wss-index-recreate {
+	margin: 16px 0 0;
+	padding-top: 14px;
+	border-top: 1px solid #f0f0f0;
+}
+.wss-index-recreate-label {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0 0 10px;
+	font-size: 12px;
+	color: #50575e;
+}
+.wss-reset-btn-danger {
+	border-color: #d63638 !important;
+	color: #b32d2e !important;
+}
+.wss-reset-btn-danger:hover {
+	background: #fcf0f1 !important;
+}
+
 /* Index health warning: "nothing found" while the index is empty is not
    the same as "no links". */
 .wss-index-alert {
@@ -1239,6 +1261,12 @@ body.wss-dark-page .wss-index-alert-title {
 	color: #e8ebed;
 }
 body.wss-dark-page .wss-index-alert-text {
+	color: #c9cdd2;
+}
+body.wss-dark-page .wss-index-recreate {
+	border-top-color: #353a41;
+}
+body.wss-dark-page .wss-index-recreate-label {
 	color: #c9cdd2;
 }
 body.wss-dark-page .wss-index-track {

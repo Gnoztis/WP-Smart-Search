@@ -659,8 +659,13 @@
 		/* One request at a time, a short pause between batches so a small
 		   PHP-FPM pool is not saturated by the loop. */
 		var INDEX_PAUSE   = 200;
-		var INDEX_RETRY   = 2000;
-		var INDEX_MAX_RETRY = 2;
+
+		/* A 500 or a gateway timeout is normal for a heavy batch: the server
+		   answers "partial" once the budget is spent, but a proxy may still
+		   cut us off. Retry with growing delays before giving up — the cursor
+		   is on the server, so a retry resumes instead of restarting. */
+		var INDEX_RETRY_DELAYS = [2000, 4000, 8000];
+		var INDEX_MAX_RETRY    = INDEX_RETRY_DELAYS.length;
 
 		/* The runner only makes sense with JS: reveal it here. */
 		if ($indexRunner.length) {
@@ -691,6 +696,7 @@
 						.replace('%1$d', data.links)
 						.replace('%2$d', data.processed || 0)
 						.replace('%3$d', data.total || 0)
+						.replace('%4$d', data.without_links || 0)
 				);
 			}
 		}
@@ -769,18 +775,23 @@
 					return;
 				}
 
-				/* A dropped request must not lose the run: retry twice, then
-				   stop keeping the progress (the cursor is on the server). */
+				/* A dropped request must not lose the run: retry up to three
+				   times with growing delays, then stop keeping the progress
+				   (the cursor is on the server, so the next run continues). */
 				indexRetries++;
 				if (indexRetries <= INDEX_MAX_RETRY) {
 					$indexText.text(WSS.i18n.indexRetry);
 					indexTimer = setTimeout(function () {
 						indexStep(false, false);
-					}, INDEX_RETRY);
+					}, INDEX_RETRY_DELAYS[indexRetries - 1]);
 					return;
 				}
 
-				indexStopWith(extractServerMessage(jqXHR) || WSS.i18n.indexError);
+				var status = jqXHR && jqXHR.status ? String(jqXHR.status) : '';
+				indexStopWith(
+					extractServerMessage(jqXHR)
+						|| (status ? WSS.i18n.indexErrorStatus.replace('%s', status) : WSS.i18n.indexError)
+				);
 			});
 		}
 

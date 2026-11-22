@@ -67,23 +67,27 @@ final class WSS_Ajax_Handler {
 		$result = $this->backfill->run_browser_step();
 		$report = WSS_Index_Backfill::report();
 
-		$total     = max( (int) $report['posts_total'], (int) $result['total'] );
-		$processed = (int) $report['processed'];
+		$total     = (int) $report['posts_total'];
+		$processed = (int) $report['posts_processed'];
 		$done      = (bool) $result['done'];
 
 		wp_send_json_success( [
-			'done'      => $done,
-			'processed' => $processed,
-			'batch'     => (int) $result['processed'],
-			'cursor'    => (int) $result['cursor'],
-			'total'     => $total,
-			'percent'   => $total > 0 ? (int) min( 100, (int) round( $processed * 100 / $total ) ) : 0,
-			'indexed'   => (int) $result['indexed'],
-			'errors'    => (int) $report['errors'],
-			'links'     => (int) $report['links_total'],
-			'state'     => (string) $report['state'],
-			'skipped'   => (bool) $result['skipped'],
-			'message'   => $done ? __( 'Готово.', 'wp-smart-search' ) : '',
+			'done'          => $done,
+			'processed'     => $processed,
+			'batch'         => (int) $result['processed'],
+			'batch_size'    => (int) $result['batch'],
+			'partial'       => (bool) $result['partial'],
+			'cursor'        => (int) $result['cursor'],
+			'total'         => $total,
+			'percent'       => (int) $report['percent'],
+			'indexed'       => (int) $report['posts_with_links'],
+			'without_links' => (int) $report['posts_without_links'],
+			'missing'       => (int) $report['missing'],
+			'errors'        => (int) $report['errors'],
+			'links'         => (int) $report['links_total'],
+			'state'         => (string) $report['state'],
+			'skipped'       => (bool) $result['skipped'],
+			'message'       => $done ? __( 'Готово.', 'wp-smart-search' ) : '',
 		] );
 	}
 

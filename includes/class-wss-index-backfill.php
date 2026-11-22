@@ -42,12 +42,27 @@ final class WSS_Index_Backfill {
 	private const MAX_ERRORS        = 100;
 	private const SCHEDULE_DELAY    = 10;
 
+	/**
+	 * Budget of one browser step, seconds.
+	 *
+	 * A browser request may sit behind a PHP or gateway time limit (often 30 s
+	 * with a proxy in front). A batch that runs into it dies with a 500 and
+	 * loses the whole step, so the batch stops itself well before that and
+	 * answers with the progress it already has.
+	 */
+	private const BROWSER_BUDGET = 15.0;
+
+	/**
+	 * Batch size ladder used by the browser runner.
+	 *
+	 * When a step hits the budget the next one is smaller, so a site with
+	 * heavy posts keeps making progress instead of timing out on every try.
+	 */
+	private const BATCH_STEPS = [ 50, 20, 10 ];
+
 	/** Cached snapshot of the counters (diagnostics, not the job state). */
 	private const STATUS_TRANSIENT = 'wss_index_status';
 	private const STATUS_TTL       = 600;
-
-	/** Share of indexed posts below which the index reports "partial". */
-	private const COVERAGE_MIN     = 0.9;
 
 	/** Option holding the browser-runner marker. */
 	public const RUNNER_OPTION = 'wss_index_runner';
@@ -75,7 +90,7 @@ final class WSS_Index_Backfill {
 	 * ============================================================ */
 
 	/**
-	 * @return array{done:bool,cursor:int,processed:int,errors:int,started:int,finished:int}
+	 * @return array{done:bool,cursor:int,processed:int,errors:int,started:int,finished:int,index_version:string,last_cron:int,batch:int,missing:int}
 	 */
 	public static function state(): array {
 		$defaults = [
@@ -86,6 +101,9 @@ final class WSS_Index_Backfill {
 			'started'       => 0,
 			'finished'      => 0,
 			'index_version' => '',
+			'last_cron'     => 0,
+			'batch'         => 0,
+			'missing'       => 0,
 		];
 
 		$raw = self::option_row();
@@ -309,8 +327,12 @@ final class WSS_Index_Backfill {
 	 * Processes one batch. Scheduled with wp_schedule_single_event() and safe
 	 * to call manually.
 	 *
+	 * The chain is kept alive deliberately: a single broken post or an
+	 * exception mid-batch must not leave the job "running" with no event to
+	 * continue it, so the next run is scheduled whenever the job is not done.
+	 *
 	 * @param bool $reschedule Queue the next run when this one is not the
-	 *                        last (CLI drives the loop itself).
+	 *                        last (CLI and REST steps drive the loop themselves).
 	 * @return string 'browser' while the browser drives the run, 'busy' when
 	 *                another worker holds the lock, 'done' when the job is
 	 *                finished after this call, 'ran' otherwise.
@@ -327,38 +349,53 @@ final class WSS_Index_Backfill {
 		}
 		set_transient( self::LOCK, time(), self::LOCK_TTL );
 
-		$state = self::state();
+		$state              = self::state();
+		$state['last_cron'] = time();
 
 		if ( ! empty( $state['done'] ) ) {
+			self::save_state( $state );
 			delete_transient( self::LOCK );
 			return 'done';
 		}
 
-		$batch     = max( 1, (int) apply_filters( 'wss_index_backfill_batch', self::DEFAULT_BATCH ) );
-		$deadline  = microtime( true ) + self::TIME_BUDGET;
-		$processed = 0;
+		$batch    = max( 1, (int) apply_filters( 'wss_index_backfill_batch', self::DEFAULT_BATCH ) );
+		$deadline = microtime( true ) + self::TIME_BUDGET;
+		$fetched  = 0;
 
-		$ids = $this->post_ids_after( (int) $state['cursor'], $batch );
+		try {
+			$ids     = $this->post_ids_after( (int) $state['cursor'], $batch );
+			$fetched = count( $ids );
 
-		foreach ( $ids as $post_id ) {
-			$post = get_post( $post_id );
+			foreach ( $ids as $post_id ) {
+				try {
+					$post = get_post( $post_id );
 
-			if ( $post instanceof WP_Post ) {
-				if ( ! $this->indexer->reindex( $post ) ) {
+					if ( $post instanceof WP_Post ) {
+						if ( ! $this->indexer->reindex( $post ) ) {
+							$state['errors']++;
+						}
+					} else {
+						// The id does not resolve to a post any more (deleted
+						// between the SELECT and this loop): it was walked, so
+						// progress counts it, but there is nothing to index.
+						$state['missing']++;
+					}
+				} catch ( \Throwable $e ) {
+					// One broken post must not break the chain.
 					$state['errors']++;
 				}
+
 				$state['processed']++;
-				$processed++;
-			}
+				$state['cursor'] = (int) $post_id;
 
-			$state['cursor'] = (int) $post_id;
-
-			if ( microtime( true ) > $deadline || $state['errors'] > self::MAX_ERRORS ) {
-				break;
+				if ( microtime( true ) > $deadline || $state['errors'] > self::MAX_ERRORS ) {
+					break;
+				}
 			}
+		} catch ( \Throwable $e ) {
+			// A failure before the first post still leaves the job resumable.
+			$state['errors']++;
 		}
-
-		$fetched = count( $ids );
 
 		if ( $fetched < $batch || $state['errors'] > self::MAX_ERRORS ) {
 			$state['done']          = true;
@@ -374,7 +411,11 @@ final class WSS_Index_Backfill {
 		delete_transient( self::LOCK );
 
 		if ( $reschedule && empty( $state['done'] ) ) {
-			wp_schedule_single_event( time() + self::SCHEDULE_DELAY, self::HOOK );
+			// Only when no event is pending already; a duplicate would run the
+			// same batch twice.
+			if ( ! wp_next_scheduled( self::HOOK ) ) {
+				wp_schedule_single_event( time() + self::SCHEDULE_DELAY, self::HOOK );
+			}
 		}
 
 		return empty( $state['done'] ) ? 'ran' : 'done';
@@ -393,38 +434,65 @@ final class WSS_Index_Backfill {
 	 * cursor is advanced with a compare-and-set — the tab whose old cursor
 	 * still matches wins, the other gets `skipped` and no work.
 	 *
-	 * @return array{processed:int,cursor:int,done:bool,total:int,indexed:int,skipped:bool,errors:int}
+	 * The step stops itself at BROWSER_BUDGET and answers with what it has
+	 * (`partial`), so a slow batch cannot run into the PHP/gateway limit and
+	 * kill the request. Hitting the budget shrinks the batch for the next
+	 * step: the size is part of the job state, so it survives the request.
+	 *
+	 * @return array{processed:int,cursor:int,done:bool,total:int,indexed:int,skipped:bool,errors:int,partial:bool,missing:int,batch:int}
 	 */
 	public function run_browser_step(): array {
-		$limit = max( 1, (int) apply_filters( 'wss_index_backfill_batch', self::DEFAULT_BATCH ) );
-
 		$state      = self::state();
 		$old_cursor = (int) $state['cursor'];
 		$total      = (int) ( self::snapshot()['posts'] ?? 0 );
+
+		$limit = self::effective_batch( (int) ( $state['batch'] ?? 0 ) );
+		$limit = max( 1, (int) apply_filters( 'wss_index_backfill_batch', $limit ) );
+
+		$deadline = microtime( true ) + self::BROWSER_BUDGET;
 
 		$ids = $this->post_ids_after( $old_cursor, $limit );
 
 		$processed  = 0;
 		$indexed    = 0;
 		$errors     = 0;
+		$missing    = 0;
+		$partial    = false;
 		$new_cursor = $old_cursor;
 
 		foreach ( $ids as $post_id ) {
-			$post = get_post( $post_id );
-
-			if ( $post instanceof WP_Post ) {
-				if ( $this->indexer->reindex( $post ) ) {
-					$indexed++;
-				} else {
-					$errors++;
-				}
-				$processed++;
+			if ( microtime( true ) > $deadline ) {
+				// Budget spent: keep the cursor where it is and let the client
+				// ask for the next (smaller) batch.
+				$partial = true;
+				break;
 			}
 
+			try {
+				$post = get_post( $post_id );
+
+				if ( $post instanceof WP_Post ) {
+					if ( $this->indexer->reindex( $post ) ) {
+						$indexed++;
+					} else {
+						$errors++;
+					}
+				} else {
+					// The id no longer resolves to a post (deleted between the
+					// SELECT and this loop): walked, nothing to index.
+					$missing++;
+				}
+			} catch ( \Throwable $e ) {
+				$errors++;
+			}
+
+			$processed++;
 			$new_cursor = (int) $post_id;
 		}
 
-		$finished = count( $ids ) < $limit;
+		$finished = ! $partial && count( $ids ) < $limit;
+
+		$next_batch = $partial ? self::smaller_batch( $limit ) : $limit;
 
 		$next = [
 			'done'          => (bool) ( $state['done'] ?? true ),
@@ -434,6 +502,9 @@ final class WSS_Index_Backfill {
 			'started'       => (int) ( $state['started'] ?? 0 ) ? (int) $state['started'] : time(),
 			'finished'      => (int) ( $state['finished'] ?? 0 ),
 			'index_version' => (string) ( $state['index_version'] ?? '' ),
+			'last_cron'     => (int) ( $state['last_cron'] ?? 0 ),
+			'batch'         => $next_batch,
+			'missing'       => (int) $state['missing'] + $missing,
 		];
 
 		if ( $finished ) {
@@ -456,6 +527,9 @@ final class WSS_Index_Backfill {
 				'indexed'   => 0,
 				'skipped'   => true,
 				'errors'    => (int) $fresh['errors'],
+				'partial'   => false,
+				'missing'   => 0,
+				'batch'     => self::effective_batch( (int) ( $fresh['batch'] ?? 0 ) ),
 			];
 		}
 
@@ -471,7 +545,38 @@ final class WSS_Index_Backfill {
 			'indexed'   => $indexed,
 			'skipped'   => false,
 			'errors'    => (int) $next['errors'],
+			'partial'   => $partial,
+			'missing'   => $missing,
+			'batch'     => $next_batch,
 		];
+	}
+
+	/**
+	 * Batch size for the next step (0 = the default ladder start).
+	 */
+	private static function effective_batch( int $stored ): int {
+		$steps = self::BATCH_STEPS;
+
+		if ( $stored > 0 ) {
+			return max( end( $steps ), min( $steps[0], $stored ) );
+		}
+
+		return $steps[0];
+	}
+
+	/**
+	 * Next size down the ladder, never below the smallest step.
+	 */
+	private static function smaller_batch( int $current ): int {
+		$steps = self::BATCH_STEPS;
+
+		foreach ( $steps as $step ) {
+			if ( $current > $step ) {
+				return $step;
+			}
+		}
+
+		return end( $steps );
 	}
 
 	/**
@@ -580,41 +685,67 @@ final class WSS_Index_Backfill {
 	}
 
 	/**
-	 * Synchronous full rebuild for WP-CLI: resets the cursor and processes
-	 * batches until the posts run out.
+	 * Synchronous rebuild for WP-CLI: processes batches until the posts run
+	 * out.
 	 *
-	 * @param int           $batch Posts per batch.
-	 * @param callable|null $tick  Receives (processed, errors, cursor).
-	 * @return array{processed:int,errors:int}
+	 * The reliable path on a large site: no browser, no WP-Cron, no per-request
+	 * time limit. With $resume the run continues from the stored cursor (what
+	 * the browser or a previous CLI run left behind); otherwise it starts from
+	 * zero.
+	 *
+	 * @param int           $batch  Posts per batch.
+	 * @param callable|null $tick   Receives (processed, errors, cursor) after each batch.
+	 * @param bool          $resume Continue from the stored cursor instead of resetting.
+	 * @return array{processed:int,errors:int,missing:int,done:bool,cursor:int}
 	 */
-	public function rebuild_sync( int $batch = 200, ?callable $tick = null ): array {
+	public function rebuild_sync( int $batch = 200, ?callable $tick = null, bool $resume = false ): array {
 		$batch = max( 1, $batch );
 
-		self::save_state( [
-			'done'          => false,
-			'cursor'        => 0,
-			'processed'     => 0,
-			'errors'        => 0,
-			'started'       => time(),
-			'finished'      => 0,
-			'index_version' => '',
-		] );
+		$state = self::state();
 
-		$cursor    = 0;
-		$processed = 0;
-		$errors    = 0;
+		if ( ! $resume ) {
+			$state = [
+				'done'          => false,
+				'cursor'        => 0,
+				'processed'     => 0,
+				'errors'        => 0,
+				'started'       => time(),
+				'finished'      => 0,
+				'index_version' => '',
+				'batch'         => 0,
+				'missing'       => 0,
+			];
+			self::save_state( $state );
+		} else {
+			$state['done']     = false;
+			$state['finished'] = 0;
+			self::save_state( $state );
+		}
+
+		$cursor    = (int) $state['cursor'];
+		$processed = (int) $state['processed'];
+		$errors    = (int) $state['errors'];
+		$missing   = (int) ( $state['missing'] ?? 0 );
+		$started   = (int) ( $state['started'] ?? 0 ) ? (int) $state['started'] : time();
 
 		do {
 			$ids = $this->post_ids_after( $cursor, $batch );
 
 			foreach ( $ids as $post_id ) {
-				$post = get_post( $post_id );
-				if ( $post instanceof WP_Post ) {
-					if ( ! $this->indexer->reindex( $post ) ) {
-						$errors++;
+				try {
+					$post = get_post( $post_id );
+					if ( $post instanceof WP_Post ) {
+						if ( ! $this->indexer->reindex( $post ) ) {
+							$errors++;
+						}
+					} else {
+						$missing++;
 					}
-					$processed++;
+				} catch ( \Throwable $e ) {
+					$errors++;
 				}
+
+				$processed++;
 				$cursor = (int) $post_id;
 			}
 
@@ -623,17 +754,28 @@ final class WSS_Index_Backfill {
 			}
 		} while ( count( $ids ) === $batch );
 
-		self::save_state( [
+		$final = [
 			'done'          => true,
 			'cursor'        => $cursor,
 			'processed'     => $processed,
 			'errors'        => $errors,
-			'started'       => time(),
+			'started'       => $started,
 			'finished'      => time(),
 			'index_version' => WSS_Config::LINKS_INDEX_VERSION,
-		] );
+			'batch'         => 0,
+			'missing'       => $missing,
+			'last_cron'     => (int) ( $state['last_cron'] ?? 0 ),
+		];
 
-		return [ 'processed' => $processed, 'errors' => $errors ];
+		self::save_state( $final );
+
+		return [
+			'processed' => $processed,
+			'errors'    => $errors,
+			'missing'   => $missing,
+			'done'      => true,
+			'cursor'    => $cursor,
+		];
 	}
 
 	/**
@@ -669,36 +811,56 @@ final class WSS_Index_Backfill {
 	/**
 	 * Index health: counters, state and whether a rebuild is needed.
 	 *
+	 * Completion is decided by the job state (done + index_version), never by
+	 * a COUNT of the links table: a post without external links is indexed
+	 * correctly but has no rows, so counting rows made a finished rebuild look
+	 * unfinished forever (2.6.2 and earlier).
+	 *
 	 * state:
-	 *  - empty   — the site has posts, the index has none: a link search
-	 *              answers "nothing found" for every query;
-	 *  - partial — a rebuild never finished, or less than COVERAGE_MIN of the
-	 *              posts are indexed;
+	 *  - empty   — the site has posts, nothing was ever indexed and the index
+	 *              has no rows: a link search answers "nothing found";
+	 *  - partial — the rebuild has not finished yet;
 	 *  - stale   — the index was built with an older row format (for example
 	 *              before anchor_kind existed);
-	 *  - ready   — nothing to do.
+	 *  - ready   — the rebuild finished and the format matches.
 	 *
 	 * /me and GET /wss/v1/index both use this method, so they cannot
 	 * disagree.
 	 *
-	 * @return array{state:string,posts_total:int,posts_indexed:int,links_total:int,generation:int,index_version:string,needs_rebuild:bool,table:bool,done:bool,cursor:int,processed:int,errors:int,last_run:int}
+	 * @return array{state:string,percent:int,posts_total:int,posts_processed:int,posts_with_links:int,posts_without_links:int,links_total:int,generation:int,index_version:string,needs_rebuild:bool,table:bool,done:bool,cursor:int,processed:int,errors:int,missing:int,batch:int,last_run:int,cron:array{next:int,last:int,disabled:bool},browser_marker:bool}
 	 */
 	public static function report(): array {
 		$state = self::state();
 		$snap  = self::snapshot();
 
-		$posts_total   = (int) $snap['posts'];
-		$posts_indexed = (int) $snap['posts_indexed'];
-		$links_total   = (int) $snap['links'];
+		$posts_total      = (int) $snap['posts'];
+		$posts_with_links = (int) $snap['posts_indexed'];
+		$links_total      = (int) $snap['links'];
+
+		$cursor          = (int) $state['cursor'];
+		$posts_processed = $cursor > 0 ? WSS_Links_Indexer::count_posts( $cursor ) : 0;
+
+		// Rows written for posts past the cursor (a post saved during the run)
+		// must not push the difference below zero.
+		$posts_without_links = max( 0, $posts_processed - $posts_with_links );
 
 		$generation    = (int) get_option( WSS_Config::CACHE_GEN_OPTION, 0 );
 		$index_version = (string) ( $state['index_version'] ?? '' );
+		$done          = ! empty( $state['done'] );
 
-		$coverage = $posts_total > 0 ? ( $posts_indexed / $posts_total ) : 1.0;
+		$schema      = $snap['schema'] ?? WSS_Links_Indexer::schema_info();
+		$schema_ok   = 'ok' === (string) ( $schema['state'] ?? 'missing' );
+		$schema_miss = 'missing' === (string) ( $schema['state'] ?? 'missing' );
 
-		if ( $posts_total > 0 && $posts_indexed === 0 ) {
+		if ( $schema_miss ) {
+			// Nothing is stored at all: no rows to contradict the "empty".
 			$health = 'empty';
-		} elseif ( empty( $state['done'] ) || $coverage < self::COVERAGE_MIN ) {
+		} elseif ( $posts_total === 0 ) {
+			// Nothing to index: no format to compare against either.
+			$health = 'ready';
+		} elseif ( $links_total === 0 && $posts_processed === 0 ) {
+			$health = 'empty';
+		} elseif ( ! $done ) {
 			$health = 'partial';
 		} elseif ( $index_version !== WSS_Config::LINKS_INDEX_VERSION ) {
 			$health = 'stale';
@@ -706,26 +868,76 @@ final class WSS_Index_Backfill {
 			$health = 'ready';
 		}
 
+		$percent = $posts_total > 0
+			? (int) min( 100, (int) round( $posts_processed * 100 / $posts_total ) )
+			: 100;
+
 		$last_run = (int) ( $state['finished'] ?? 0 );
 		if ( $last_run <= 0 ) {
 			$last_run = (int) ( $state['started'] ?? 0 );
 		}
 
 		return [
-			'state'         => $health,
-			'posts_total'   => $posts_total,
-			'posts_indexed' => $posts_indexed,
-			'links_total'   => $links_total,
-			'generation'    => $generation,
-			'index_version' => $index_version,
-			'needs_rebuild' => 'ready' !== $health,
-			'table'         => (bool) $snap['table'],
-			'done'          => (bool) $state['done'],
-			'cursor'        => (int) $state['cursor'],
-			'processed'     => (int) $state['processed'],
-			'errors'        => (int) $state['errors'],
-			'last_run'      => $last_run,
+			'state'               => $health,
+			'percent'             => $percent,
+			'posts_total'         => $posts_total,
+			'posts_processed'     => $posts_processed,
+			'posts_with_links'    => $posts_with_links,
+			'posts_without_links' => $posts_without_links,
+			'links_total'         => $links_total,
+			'generation'          => $generation,
+			'index_version'       => $index_version,
+			'needs_rebuild'       => 'ready' !== $health || ! $schema_ok,
+			'schema'              => $schema,
+			'table'               => (bool) $snap['table'],
+			'done'                => $done,
+			'cursor'              => $cursor,
+			'processed'           => (int) $state['processed'],
+			'errors'              => (int) $state['errors'],
+			'missing'             => (int) ( $state['missing'] ?? 0 ),
+			'batch'               => self::effective_batch( (int) ( $state['batch'] ?? 0 ) ),
+			'last_run'            => $last_run,
+			'cron'                => [
+				'next'     => (int) wp_next_scheduled( self::HOOK ),
+				'last'     => (int) ( $state['last_cron'] ?? 0 ),
+				'disabled' => self::cron_disabled(),
+			],
+			'browser_marker'      => self::browser_active(),
 		];
+	}
+
+	/**
+	 * Whether WP-Cron is switched off on this site.
+	 *
+	 * With DISABLE_WP_CRON the background rebuild never runs: the browser
+	 * button and `wp wss index rebuild` are the only ways to finish it.
+	 */
+	public static function cron_disabled(): bool {
+		return defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
+	}
+
+	/**
+	 * Resets the job after the index table was recreated.
+	 *
+	 * The rebuild is not started: the operator sees the new empty index and
+	 * decides when to run it. The browser marker and the cached snapshot are
+	 * dropped so nothing describes the old table.
+	 */
+	public static function reset_after_recreate(): void {
+		self::save_state( [
+			'done'          => false,
+			'cursor'        => 0,
+			'processed'     => 0,
+			'errors'        => 0,
+			'started'       => 0,
+			'finished'      => 0,
+			'index_version' => '',
+			'batch'         => 0,
+			'missing'       => 0,
+		] );
+
+		self::browser_release();
+		self::flush_status();
 	}
 
 	/**
@@ -779,7 +991,7 @@ final class WSS_Index_Backfill {
 	 */
 	private static function snapshot(): array {
 		$cached = get_transient( self::STATUS_TRANSIENT );
-		if ( is_array( $cached ) && isset( $cached['table'], $cached['links'], $cached['posts'], $cached['posts_indexed'] ) ) {
+		if ( is_array( $cached ) && isset( $cached['table'], $cached['links'], $cached['posts'], $cached['posts_indexed'], $cached['schema'] ) ) {
 			return $cached;
 		}
 
@@ -788,6 +1000,7 @@ final class WSS_Index_Backfill {
 			'links'         => WSS_Links_Indexer::count_rows(),
 			'posts'         => WSS_Links_Indexer::count_posts(),
 			'posts_indexed' => WSS_Links_Indexer::count_indexed_posts(),
+			'schema'        => WSS_Links_Indexer::schema_info(),
 		];
 
 		set_transient( self::STATUS_TRANSIENT, $snapshot, self::STATUS_TTL );

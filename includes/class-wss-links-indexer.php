@@ -5,6 +5,16 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class WSS_Links_Indexer {
 
+	/**
+	 * Columns the runtime queries rely on. A table without them is not
+	 * "empty", it is broken: searches fail or silently skip rows.
+	 */
+	private const REQUIRED_COLUMNS = [
+		'id', 'post_id', 'url', 'url_hash', 'url_norm', 'url_norm_hash',
+		'scheme', 'host', 'domain', 'path', 'anchor', 'anchor_kind',
+		'context', 'created_at',
+	];
+
 	/** @var array<int,bool> */
 	private array $indexed = [];
 	private array $deleted = [];
@@ -57,6 +67,138 @@ final class WSS_Links_Indexer {
 	}
 
 	/**
+	 * Actual schema of the index table compared with the expected one.
+	 *
+	 * A site that ran an older version can carry a table without the
+	 * anchor_kind column; the version option may even say otherwise. The state
+	 * tells the operator which of the three repair paths applies:
+	 *
+	 *  - missing  — no table at all;
+	 *  - outdated — all columns exist, the stored schema version is old;
+	 *  - broken   — the table exists but required columns are absent;
+	 *  - ok       — table, columns and version match.
+	 *
+	 * @return array{state:string,exists:bool,rows:int,stored_version:string,expected_version:string,columns:string[],missing_columns:string[]}
+	 */
+	public static function schema_info(): array {
+		$info = [
+			'state'            => 'missing',
+			'exists'           => false,
+			'rows'             => 0,
+			'stored_version'   => (string) get_option( WSS_Config::LINKS_TABLE_VER_OPTION, '' ),
+			'expected_version' => WSS_Config::LINKS_TABLE_VER,
+			'columns'          => [],
+			'missing_columns'  => [],
+		];
+
+		if ( ! self::table_exists() ) {
+			return $info;
+		}
+
+		global $wpdb;
+
+		$table = self::table();
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+		$rows = $wpdb->get_results( "SHOW COLUMNS FROM {$table}", ARRAY_A ); // phpcs:ignore -- a table name cannot be a prepare() placeholder.
+
+		$columns = [];
+		if ( is_array( $rows ) ) {
+			foreach ( $rows as $row ) {
+				if ( isset( $row['Field'] ) ) {
+					$columns[] = (string) $row['Field'];
+				}
+			}
+		}
+
+		$missing = array_values( array_diff( self::REQUIRED_COLUMNS, $columns ) );
+
+		$info['exists']          = true;
+		$info['rows']            = self::count_rows();
+		$info['columns']         = $columns;
+		$info['missing_columns'] = $missing;
+
+		if ( ! empty( $missing ) ) {
+			$info['state'] = 'broken';
+		} elseif ( $info['stored_version'] !== WSS_Config::LINKS_TABLE_VER ) {
+			$info['state'] = 'outdated';
+		} else {
+			$info['state'] = 'ok';
+		}
+
+		return $info;
+	}
+
+	/**
+	 * Drops the index table and creates it again with the current schema.
+	 *
+	 * Destructive by design: rows of an outdated or broken table cannot be
+	 * trusted, and the admin asked for a clean start. The schema SQL lives in
+	 * install_table() only — this method never duplicates it. The rebuild is
+	 * not started here; the operator decides when.
+	 *
+	 * @return array{ok:bool,old_version:string,new_version:string,rows_dropped:int,state:string}
+	 */
+	public static function recreate(): array {
+		global $wpdb;
+
+		$old_version  = (string) get_option( WSS_Config::LINKS_TABLE_VER_OPTION, '' );
+		$rows_dropped = self::count_rows();
+		$table        = self::table();
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+		$wpdb->query( "DROP TABLE IF EXISTS `{$table}`" ); // phpcs:ignore -- a table name cannot be a prepare() placeholder.
+
+		self::install_table();
+
+		$info = self::schema_info();
+
+		$result = [
+			'ok'           => 'ok' === $info['state'],
+			'old_version'  => $old_version,
+			'new_version'  => WSS_Config::LINKS_TABLE_VER,
+			'rows_dropped' => $rows_dropped,
+			'state'        => $info['state'],
+		];
+
+		// One line for the site log: what was replaced and how much was lost.
+		error_log(
+			sprintf(
+				'WSS: links index recreated: schema %1$s -> %2$s, rows dropped: %3$d, state: %4$s',
+				$old_version !== '' ? $old_version : '(none)',
+				$result['new_version'],
+				$rows_dropped,
+				$result['state']
+			)
+		);
+
+		return $result;
+	}
+
+	/**
+	 * Runs dbDelta against the current schema, keeping the rows.
+	 *
+	 * dbDelta can add a missing column or index, so a table that only lacks
+	 * anchor_kind is repaired without losing data. It cannot drop columns.
+	 *
+	 * @return array{ok:bool,before:string,after:string,missing_before:string[],missing_after:string[]}
+	 */
+	public static function repair(): array {
+		$before = self::schema_info();
+
+		self::install_table();
+
+		$after = self::schema_info();
+
+		return [
+			'ok'             => 'ok' === $after['state'],
+			'before'         => $before['state'],
+			'after'          => $after['state'],
+			'missing_before' => $before['missing_columns'],
+			'missing_after'  => $after['missing_columns'],
+		];
+	}
+
+	/**
 	 * Table name including the site prefix.
 	 */
 	public static function table(): string {
@@ -100,21 +242,30 @@ final class WSS_Links_Indexer {
 	 * Posts that belong in the index: every status the search can return.
 	 * Visibility is enforced at query time, so indexing private posts too
 	 * keeps the index consistent with what save_post writes.
+	 *
+	 * A post without external links gets no rows in the links table: it is
+	 * still indexed, it just has nothing to store. Progress therefore counts
+	 * posts, not rows (see WSS_Index_Backfill::report()).
+	 *
+	 * @param int $max_id Only posts with ID <= this value (0 = all).
 	 */
-	public static function count_posts(): int {
+	public static function count_posts( int $max_id = 0 ): int {
 		global $wpdb;
 
 		$statuses = WSS_Config::ALLOWED_STATUSES;
 		$ph       = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
 
+		$sql    = "SELECT COUNT(*) FROM {$wpdb->posts}
+				WHERE post_type = 'post' AND post_status IN ({$ph})";
+		$params = array_values( $statuses );
+
+		if ( $max_id > 0 ) {
+			$sql     .= ' AND ID <= %d';
+			$params[] = $max_id;
+		}
+
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
-		return (int) $wpdb->get_var(
-			$wpdb->prepare(
-				"SELECT COUNT(*) FROM {$wpdb->posts}
-				WHERE post_type = 'post' AND post_status IN ({$ph})",
-				$statuses
-			)
-		);
+		return (int) $wpdb->get_var( $wpdb->prepare( $sql, $params ) );
 	}
 
 	/**

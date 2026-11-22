@@ -7,10 +7,12 @@ final class WSS_Rest_Controller {
 
 	private WSS_Search_Engine $engine;
 	private WSS_Rate_Limiter  $rate_limiter;
+	private WSS_Index_Backfill $backfill;
 
-	public function __construct( WSS_Search_Engine $engine, WSS_Rate_Limiter $rate_limiter ) {
+	public function __construct( WSS_Search_Engine $engine, WSS_Rate_Limiter $rate_limiter, ?WSS_Index_Backfill $backfill = null ) {
 		$this->engine       = $engine;
 		$this->rate_limiter = $rate_limiter;
+		$this->backfill     = $backfill ?? new WSS_Index_Backfill();
 	}
 
 	public function register_hooks(): void {
@@ -64,6 +66,22 @@ final class WSS_Rest_Controller {
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/index/rebuild', [
 			'methods'             => [ 'POST' ],
 			'callback'            => [ $this, 'handle_index_rebuild' ],
+			'permission_callback' => [ $this, 'permission_check_admin' ],
+		] );
+
+		// One batch of the background worker, synchronously: lets an operator
+		// verify the cron path without waiting for WP-Cron to fire.
+		register_rest_route( WSS_Config::REST_NAMESPACE, '/index/step', [
+			'methods'             => [ 'POST' ],
+			'callback'            => [ $this, 'handle_index_step' ],
+			'permission_callback' => [ $this, 'permission_check_admin' ],
+		] );
+
+		// Destructive: drops the whole index and creates it again. Requires an
+		// explicit confirmation in the body so a stray POST cannot wipe it.
+		register_rest_route( WSS_Config::REST_NAMESPACE, '/index/recreate', [
+			'methods'             => [ 'POST' ],
+			'callback'            => [ $this, 'handle_index_recreate' ],
 			'permission_callback' => [ $this, 'permission_check_admin' ],
 		] );
 	}
@@ -832,6 +850,79 @@ final class WSS_Rest_Controller {
 			'processed'   => $report['processed'],
 			'last_run'    => $report['last_run'],
 		], 202 );
+	}
+
+	/**
+	 * POST /wss/v1/index/recreate — drop the index and create it again.
+	 *
+	 * The body must carry {"confirm":"recreate"}: the action deletes every
+	 * indexed row, and a mistyped request must not do that by accident.
+	 */
+	public function handle_index_recreate( WP_REST_Request $request ) {
+		$confirm = $request->get_param( 'confirm' );
+
+		if ( 'recreate' !== ( is_string( $confirm ) ? trim( $confirm ) : '' ) ) {
+			return new WP_Error(
+				'wss_confirm_required',
+				__( 'Пересоздание удалит индекс. Передайте confirm=recreate, чтобы подтвердить.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
+
+		$result = WSS_Links_Indexer::recreate();
+		WSS_Index_Backfill::reset_after_recreate();
+
+		$report = WSS_Index_Backfill::report();
+
+		return new WP_REST_Response( [
+			'recreated'     => (bool) $result['ok'],
+			'old_version'   => (string) $result['old_version'],
+			'new_version'   => (string) $result['new_version'],
+			'rows_dropped'  => (int) $result['rows_dropped'],
+			'schema'        => $report['schema'],
+			'state'         => (string) $report['state'],
+			'needs_rebuild' => (bool) $report['needs_rebuild'],
+		], 200 );
+	}
+
+	/**
+	 * POST /wss/v1/index/step — exactly one batch of the background worker.
+	 *
+	 * Meant for diagnostics: with WP-Cron disabled or slow there was no way
+	 * to check that the cron path still works. It takes the same lock and
+	 * writes the same state as the scheduled run, so a successful answer
+	 * proves the chain is healthy. Returns 409 when the batch could not run
+	 * (another worker holds the lock, or the browser drives the rebuild).
+	 */
+	public function handle_index_step( WP_REST_Request $request ) {
+		$result = $this->backfill->run( false );
+		$report = WSS_Index_Backfill::report();
+
+		if ( 'ran' !== $result && 'done' !== $result ) {
+			return new WP_REST_Response( [
+				'ran'      => false,
+				'reason'   => $result,
+				'state'    => $report['state'],
+				'retry_in' => 5,
+			], 409 );
+		}
+
+		return new WP_REST_Response( [
+			'ran'                 => true,
+			'done'                => (bool) $report['done'],
+			'state'               => $report['state'],
+			'percent'             => (int) $report['percent'],
+			'cursor'              => (int) $report['cursor'],
+			'batch'               => (int) $report['batch'],
+			'posts_total'         => (int) $report['posts_total'],
+			'posts_processed'     => (int) $report['posts_processed'],
+			'posts_with_links'    => (int) $report['posts_with_links'],
+			'posts_without_links' => (int) $report['posts_without_links'],
+			'links_total'         => (int) $report['links_total'],
+			'missing'             => (int) $report['missing'],
+			'errors'              => (int) $report['errors'],
+			'cron'                => $report['cron'],
+		], 200 );
 	}
 
 	public function handle_me( WP_REST_Request $request ) {
