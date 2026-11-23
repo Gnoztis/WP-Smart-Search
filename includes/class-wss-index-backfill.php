@@ -104,6 +104,7 @@ final class WSS_Index_Backfill {
 			'last_cron'     => 0,
 			'batch'         => 0,
 			'missing'       => 0,
+			'links_written' => 0,
 		];
 
 		$raw = self::option_row();
@@ -187,6 +188,7 @@ final class WSS_Index_Backfill {
 				'started'       => time(),
 				'finished'      => 0,
 				'index_version' => '',
+				'links_written' => 0,
 			] );
 		}
 
@@ -210,6 +212,7 @@ final class WSS_Index_Backfill {
 			'started'       => time(),
 			'finished'      => 0,
 			'index_version' => '',
+			'links_written' => 0,
 		] );
 	}
 
@@ -371,8 +374,12 @@ final class WSS_Index_Backfill {
 					$post = get_post( $post_id );
 
 					if ( $post instanceof WP_Post ) {
-						if ( ! $this->indexer->reindex( $post ) ) {
+						$written = $this->indexer->reindex_count( $post );
+
+						if ( $written < 0 ) {
 							$state['errors']++;
+						} else {
+							$state['links_written'] = (int) ( $state['links_written'] ?? 0 ) + $written;
 						}
 					} else {
 						// The id does not resolve to a post any more (deleted
@@ -453,12 +460,13 @@ final class WSS_Index_Backfill {
 
 		$ids = $this->post_ids_after( $old_cursor, $limit );
 
-		$processed  = 0;
-		$indexed    = 0;
-		$errors     = 0;
-		$missing    = 0;
-		$partial    = false;
-		$new_cursor = $old_cursor;
+		$processed     = 0;
+		$indexed       = 0;
+		$errors        = 0;
+		$missing       = 0;
+		$links_written = 0;
+		$partial       = false;
+		$new_cursor    = $old_cursor;
 
 		foreach ( $ids as $post_id ) {
 			if ( microtime( true ) > $deadline ) {
@@ -472,10 +480,13 @@ final class WSS_Index_Backfill {
 				$post = get_post( $post_id );
 
 				if ( $post instanceof WP_Post ) {
-					if ( $this->indexer->reindex( $post ) ) {
-						$indexed++;
-					} else {
+					$written = $this->indexer->reindex_count( $post );
+
+					if ( $written < 0 ) {
 						$errors++;
+					} else {
+						$indexed++;
+						$links_written += $written;
 					}
 				} else {
 					// The id no longer resolves to a post (deleted between the
@@ -505,6 +516,7 @@ final class WSS_Index_Backfill {
 			'last_cron'     => (int) ( $state['last_cron'] ?? 0 ),
 			'batch'         => $next_batch,
 			'missing'       => (int) $state['missing'] + $missing,
+			'links_written' => (int) ( $state['links_written'] ?? 0 ) + $links_written,
 		];
 
 		if ( $finished ) {
@@ -714,6 +726,7 @@ final class WSS_Index_Backfill {
 				'index_version' => '',
 				'batch'         => 0,
 				'missing'       => 0,
+				'links_written' => 0,
 			];
 			self::save_state( $state );
 		} else {
@@ -722,11 +735,12 @@ final class WSS_Index_Backfill {
 			self::save_state( $state );
 		}
 
-		$cursor    = (int) $state['cursor'];
-		$processed = (int) $state['processed'];
-		$errors    = (int) $state['errors'];
-		$missing   = (int) ( $state['missing'] ?? 0 );
-		$started   = (int) ( $state['started'] ?? 0 ) ? (int) $state['started'] : time();
+		$cursor        = (int) $state['cursor'];
+		$processed     = (int) $state['processed'];
+		$errors        = (int) $state['errors'];
+		$missing       = (int) ( $state['missing'] ?? 0 );
+		$links_written = (int) ( $state['links_written'] ?? 0 );
+		$started       = (int) ( $state['started'] ?? 0 ) ? (int) $state['started'] : time();
 
 		do {
 			$ids = $this->post_ids_after( $cursor, $batch );
@@ -735,8 +749,12 @@ final class WSS_Index_Backfill {
 				try {
 					$post = get_post( $post_id );
 					if ( $post instanceof WP_Post ) {
-						if ( ! $this->indexer->reindex( $post ) ) {
+						$written = $this->indexer->reindex_count( $post );
+
+						if ( $written < 0 ) {
 							$errors++;
+						} else {
+							$links_written += $written;
 						}
 					} else {
 						$missing++;
@@ -764,6 +782,7 @@ final class WSS_Index_Backfill {
 			'index_version' => WSS_Config::LINKS_INDEX_VERSION,
 			'batch'         => 0,
 			'missing'       => $missing,
+			'links_written' => $links_written,
 			'last_cron'     => (int) ( $state['last_cron'] ?? 0 ),
 		];
 
@@ -827,15 +846,30 @@ final class WSS_Index_Backfill {
 	 * /me and GET /wss/v1/index both use this method, so they cannot
 	 * disagree.
 	 *
-	 * @return array{state:string,percent:int,posts_total:int,posts_processed:int,posts_with_links:int,posts_without_links:int,links_total:int,generation:int,index_version:string,needs_rebuild:bool,table:bool,done:bool,cursor:int,processed:int,errors:int,missing:int,batch:int,last_run:int,cron:array{next:int,last:int,disabled:bool},browser_marker:bool}
+	 * While a rebuild runs the counters are read live. A cached snapshot mixed
+	 * with the live cursor produced nonsense on 2.6.3 ("0 links, 16681 posts
+	 * walked, 16681 posts without links"): the snapshot was up to ten minutes
+	 * old while the progress was current. Two extra COUNTs per step during a
+	 * run are the price of numbers that agree; the cache is used only for a
+	 * finished index.
+	 *
+	 * @return array{state:string,percent:int,posts_total:int,posts_processed:int,posts_with_links:int,posts_without_links:int,links_total:int,links_written:int,links_per_post:float,generation:int,index_version:string,needs_rebuild:bool,table:bool,done:bool,cursor:int,processed:int,errors:int,missing:int,batch:int,last_run:int,cron:array{next:int,last:int,disabled:bool},browser_marker:bool,schema:array}
 	 */
 	public static function report(): array {
 		$state = self::state();
 		$snap  = self::snapshot();
+		$done  = ! empty( $state['done'] );
 
-		$posts_total      = (int) $snap['posts'];
-		$posts_with_links = (int) $snap['posts_indexed'];
-		$links_total      = (int) $snap['links'];
+		if ( $done ) {
+			$posts_total      = (int) $snap['posts'];
+			$posts_with_links = (int) $snap['posts_indexed'];
+			$links_total      = (int) $snap['links'];
+		} else {
+			// Live while the run is in flight: the snapshot may be minutes old.
+			$posts_total      = WSS_Links_Indexer::count_posts();
+			$posts_with_links = WSS_Links_Indexer::count_indexed_posts();
+			$links_total      = WSS_Links_Indexer::count_rows();
+		}
 
 		$cursor          = (int) $state['cursor'];
 		$posts_processed = $cursor > 0 ? WSS_Links_Indexer::count_posts( $cursor ) : 0;
@@ -844,9 +878,11 @@ final class WSS_Index_Backfill {
 		// must not push the difference below zero.
 		$posts_without_links = max( 0, $posts_processed - $posts_with_links );
 
+		$links_written = (int) ( $state['links_written'] ?? 0 );
+		$links_per_post = $posts_processed > 0 ? round( $links_written / $posts_processed, 2 ) : 0.0;
+
 		$generation    = (int) get_option( WSS_Config::CACHE_GEN_OPTION, 0 );
 		$index_version = (string) ( $state['index_version'] ?? '' );
-		$done          = ! empty( $state['done'] );
 
 		$schema      = $snap['schema'] ?? WSS_Links_Indexer::schema_info();
 		$schema_ok   = 'ok' === (string) ( $schema['state'] ?? 'missing' );
@@ -885,6 +921,8 @@ final class WSS_Index_Backfill {
 			'posts_with_links'    => $posts_with_links,
 			'posts_without_links' => $posts_without_links,
 			'links_total'         => $links_total,
+			'links_written'       => $links_written,
+			'links_per_post'      => $links_per_post,
 			'generation'          => $generation,
 			'index_version'       => $index_version,
 			'needs_rebuild'       => 'ready' !== $health || ! $schema_ok,
@@ -934,6 +972,7 @@ final class WSS_Index_Backfill {
 			'index_version' => '',
 			'batch'         => 0,
 			'missing'       => 0,
+			'links_written' => 0,
 		] );
 
 		self::browser_release();
@@ -1044,6 +1083,7 @@ final class WSS_Index_Backfill {
 			'started'       => 0,
 			'finished'      => time(),
 			'index_version' => '',
+			'links_written' => 0,
 		] );
 
 		delete_transient( self::LOCK );

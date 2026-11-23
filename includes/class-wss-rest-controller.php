@@ -919,6 +919,8 @@ final class WSS_Rest_Controller {
 			'posts_with_links'    => (int) $report['posts_with_links'],
 			'posts_without_links' => (int) $report['posts_without_links'],
 			'links_total'         => (int) $report['links_total'],
+			'links_written'       => (int) $report['links_written'],
+			'links_per_post'      => (float) $report['links_per_post'],
 			'missing'             => (int) $report['missing'],
 			'errors'              => (int) $report['errors'],
 			'cron'                => $report['cron'],

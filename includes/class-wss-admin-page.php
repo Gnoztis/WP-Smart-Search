@@ -172,7 +172,7 @@ final class WSS_Admin_Page {
 					'indexRetry'     => __( 'Нет ответа от сервера, повторяем…', 'wp-smart-search' ),
 					'indexError'     => __( 'Ошибка запроса. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
 					'indexErrorStatus' => __( 'Ошибка запроса (HTTP %s). Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
-					'indexCounts'    => __( 'Ссылок в индексе: %1$d; пройдено %2$d из %3$d записей; у %4$d записей нет внешних ссылок — для них строк в индексе нет, это нормально.', 'wp-smart-search' ),
+					'indexCounts'    => __( 'Ссылок в индексе: %1$d; пройдено %2$d из %3$d записей; у %4$d записей нет внешних ссылок — для них строк нет, это нормально; за прогон записано ссылок: %5$d (%6$s на запись).', 'wp-smart-search' ),
 				],
 			];
 
@@ -490,11 +490,17 @@ final class WSS_Admin_Page {
 						</div>
 					<?php endif; ?>
 
-					<?php if ( $index_status['cron']['disabled'] ) : ?>
-						<div class="wss-index-alert wss-index-alert-critical" role="alert">
-							<p class="wss-index-alert-title"><?php esc_html_e( 'WP-Cron отключён (DISABLE_WP_CRON).', 'wp-smart-search' ); ?></p>
-							<p class="wss-index-alert-text"><?php esc_html_e( 'Фоновая пересборка не запустится. Используйте «Доиндексировать из браузера» или wp wss index rebuild из консоли.', 'wp-smart-search' ); ?></p>
+					<?php if ( ! $index_status['done'] && 0 === (int) $index_status['cron']['next'] ) : ?>
+						<div class="wss-index-alert" role="alert">
+							<p class="wss-index-alert-title"><?php esc_html_e( 'Фоновая пересборка не запланирована.', 'wp-smart-search' ); ?></p>
+							<p class="wss-index-alert-text">
+								<?php esc_html_e( 'Задача не завершена, но следующего запуска в расписании нет: цепочка оборвалась. Запустите вручную «Доиндексировать из браузера» или wp wss index rebuild --continue. Если cron работает снаружи (DISABLE_WP_CRON), проверьте, что внешний скрипт вызывает wp-cron.php.', 'wp-smart-search' ); ?>
+							</p>
 						</div>
+					<?php endif; ?>
+
+					<?php if ( $index_status['cron']['disabled'] && $index_status['cron']['next'] > 0 ) : ?>
+						<p class="wss-index-note"><?php esc_html_e( 'WP-Cron отключён (DISABLE_WP_CRON): пересборку запускает внешний cron-скрипт — это нормальный режим.', 'wp-smart-search' ); ?></p>
 					<?php endif; ?>
 
 					<?php if ( isset( $_GET['wss_reindex'] ) ) : ?>
@@ -505,18 +511,37 @@ final class WSS_Admin_Page {
 						<?php
 						echo esc_html(
 							sprintf(
-								/* translators: 1: links in the index, 2: processed posts, 3: total posts, 4: posts without external links */
-								__( 'Ссылок в индексе: %1$d; пройдено %2$d из %3$d записей; у %4$d записей нет внешних ссылок — для них строк в индексе нет, это нормально.', 'wp-smart-search' ),
+								/* translators: 1: links in the index, 2: processed posts, 3: total posts, 4: posts without external links, 5: links written in this run, 6: links per post */
+								__( 'Ссылок в индексе: %1$d; пройдено %2$d из %3$d записей; у %4$d записей нет внешних ссылок — для них строк в индексе нет, это нормально; за прогон записано ссылок: %5$d (%6$s на запись).', 'wp-smart-search' ),
 								(int) $index_status['links_total'],
 								(int) $index_status['posts_processed'],
 								(int) $index_status['posts_total'],
-								(int) $index_status['posts_without_links']
+								(int) $index_status['posts_without_links'],
+								(int) $index_status['links_written'],
+								(string) number_format_i18n( (float) $index_status['links_per_post'], 2 )
 							)
 						);
 						?>
 					</p>
 
-					<?php if ( ! $index_status['cron']['disabled'] ) : ?>
+					<?php if ( ! $index_status['done'] && $index_status['posts_processed'] > 0 && 0 === (int) $index_status['links_written'] ) : ?>
+						<div class="wss-index-alert" role="alert">
+							<p class="wss-index-alert-title"><?php esc_html_e( 'Индексер прошёл записи, но не записал ни одной ссылки.', 'wp-smart-search' ); ?></p>
+							<p class="wss-index-alert-text">
+								<?php
+								echo esc_html(
+									sprintf(
+										/* translators: %d: number of processed posts */
+										__( 'Это симптом, а не норма: проверьте, что таблица индекса доступна на запись (права БД) и что записи действительно содержат внешние ссылки. Пройдено записей: %d.', 'wp-smart-search' ),
+										(int) $index_status['posts_processed']
+									)
+								);
+								?>
+							</p>
+						</div>
+					<?php endif; ?>
+
+					<?php if ( ! $index_status['cron']['disabled'] || $index_status['cron']['next'] > 0 ) : ?>
 						<p class="wss-index-line">
 							<?php
 							echo esc_html(
@@ -588,11 +613,11 @@ final class WSS_Admin_Page {
 						<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="wss-index-recreate">
 							<?php wp_nonce_field( 'wss_index_recreate' ); ?>
 							<input type="hidden" name="action" value="wss_index_recreate">
+							<button type="submit" class="wss-reset-btn wss-reset-btn-danger"><?php esc_html_e( 'Пересоздать индекс', 'wp-smart-search' ); ?></button>
 							<label class="wss-index-recreate-label">
 								<input type="checkbox" name="wss_recreate_confirm" value="1">
 								<?php esc_html_e( 'Понимаю, что индекс будет удалён', 'wp-smart-search' ); ?>
 							</label>
-							<button type="submit" class="wss-reset-btn wss-reset-btn-danger"><?php esc_html_e( 'Пересоздать индекс', 'wp-smart-search' ); ?></button>
 						</form>
 					<?php endif; ?>
 
@@ -1248,12 +1273,14 @@ final class WSS_Admin_Page {
 			[ 'posts_processed', 'integer', __( 'Сколько записей пройдено: записи с ID <= cursor.', 'wp-smart-search' ) ],
 			[ 'posts_with_links', 'integer', __( 'У скольких записей есть хотя бы одна внешняя ссылка (DISTINCT post_id по таблице ссылок).', 'wp-smart-search' ) ],
 			[ 'posts_without_links', 'integer', __( 'Записи без внешних ссылок: строк в индексе у них нет, это нормально, а не ошибка.', 'wp-smart-search' ) ],
-			[ 'links_total', 'integer', __( 'Сколько ссылок в индексе.', 'wp-smart-search' ) ],
+			[ 'links_total', 'integer', __( 'Сколько ссылок в индексе. Во время прогона считается по фактическим строкам, а не по кэшу.', 'wp-smart-search' ) ],
+			[ 'links_written', 'integer', __( 'Сколько строк записано за текущий прогон. 0 при пройденных записях — симптом, а не норма.', 'wp-smart-search' ) ],
+			[ 'links_per_post', 'float', __( 'Среднее число ссылок на пройденную запись за прогон (links_written / posts_processed).', 'wp-smart-search' ) ],
 			[ 'generation', 'integer', __( 'Поколение кэша: растёт при каждом сохранении записи.', 'wp-smart-search' ) ],
 			[ 'index_version', 'string', __( 'Версия формата строк индекса, которой завершилась последняя полная пересборка.', 'wp-smart-search' ) ],
 			[ 'done, cursor, processed, errors', 'integer | boolean', __( 'Состояние фоновой задачи пересборки.', 'wp-smart-search' ) ],
 			[ 'last_run', 'integer', __( 'Unix-время последнего завершённого (или начатого) прогона.', 'wp-smart-search' ) ],
-			[ 'cron', '{ next, last, disabled }', __( 'WP-Cron: next — когда запланирован следующий пакет (0 — не запланирован), last — когда cron последний раз выполнял пакет, disabled — включён DISABLE_WP_CRON.', 'wp-smart-search' ) ],
+			[ 'cron', '{ next, last, disabled }', __( 'WP-Cron: next — когда запланирован следующий пакет (0 — не запланирован), last — когда cron последний раз выполнял пакет, disabled — включён DISABLE_WP_CRON (информационно: при внешнем cron это норма).', 'wp-smart-search' ) ],
 			[ 'browser_marker', 'boolean', __( 'Сейчас пересборку ведёт браузер: cron на это время не работает.', 'wp-smart-search' ) ],
 			[ 'schema', '{ state, exists, rows, stored_version, expected_version, columns, missing_columns }', __( 'Состояние схемы таблицы: ok, missing (таблицы нет), outdated (версия схемы старая), broken (не хватает колонок, например anchor_kind). Схема проверяется по фактическим колонкам, а не только по опции версии.', 'wp-smart-search' ) ],
 		];

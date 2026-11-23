@@ -374,6 +374,19 @@ final class WSS_Links_Indexer {
 	 * @return bool False when a database write failed.
 	 */
 	public function reindex( WP_Post $post ): bool {
+		return $this->reindex_count( $post ) >= 0;
+	}
+
+	/**
+	 * Same as reindex(), but reports how many link rows the post produced.
+	 *
+	 * A post without external links legitimately produces 0 — the rebuild
+	 * needs that number to tell "indexed, nothing to store" from "the indexer
+	 * writes nothing at all", which is a symptom.
+	 *
+	 * @return int Rows written, or -1 when a database write failed.
+	 */
+	public function reindex_count( WP_Post $post ): int {
 		global $wpdb;
 		$table = $this->table();
 
@@ -401,7 +414,7 @@ final class WSS_Links_Indexer {
 		}
 
 		if ( empty( $rows ) ) {
-			return $wpdb->last_error === '';
+			return $wpdb->last_error === '' ? 0 : -1;
 		}
 
 		/* ---------- 2. upsert current links ---------- */
@@ -435,7 +448,7 @@ final class WSS_Links_Indexer {
 			}
 		}
 
-		return $ok;
+		return $ok ? count( $rows ) : -1;
 	}
 
 	/**

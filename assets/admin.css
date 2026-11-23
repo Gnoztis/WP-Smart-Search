@@ -409,17 +409,28 @@
 	margin: 0 8px 0 0;
 }
 
-/* Destructive action: recreate the index table from scratch. */
+/* Destructive action: recreate the index table from scratch. The button
+   comes first and the confirmation label sits to its right on the same
+   baseline; on a narrow screen the label wraps below. */
 .wss-index-recreate {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 8px 16px;
 	margin: 16px 0 0;
 	padding-top: 14px;
 	border-top: 1px solid #f0f0f0;
 }
+.wss-index-recreate .wss-reset-btn {
+	width: auto;
+	min-width: 200px;
+	margin: 0;
+}
 .wss-index-recreate-label {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	margin: 0 0 10px;
+	display: inline-flex;
+	align-items: baseline;
+	gap: 6px;
+	margin: 0;
 	font-size: 12px;
 	color: #50575e;
 }

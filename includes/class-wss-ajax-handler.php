@@ -82,6 +82,8 @@ final class WSS_Ajax_Handler {
 			'percent'       => (int) $report['percent'],
 			'indexed'       => (int) $report['posts_with_links'],
 			'without_links' => (int) $report['posts_without_links'],
+			'links_written' => (int) $report['links_written'],
+			'links_per_post' => (string) number_format_i18n( (float) $report['links_per_post'], 2 ),
 			'missing'       => (int) $report['missing'],
 			'errors'        => (int) $report['errors'],
 			'links'         => (int) $report['links_total'],

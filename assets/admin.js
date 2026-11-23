@@ -697,6 +697,8 @@
 						.replace('%2$d', data.processed || 0)
 						.replace('%3$d', data.total || 0)
 						.replace('%4$d', data.without_links || 0)
+						.replace('%5$d', data.links_written || 0)
+						.replace('%6$s', data.links_per_post || '0')
 				);
 			}
 		}
