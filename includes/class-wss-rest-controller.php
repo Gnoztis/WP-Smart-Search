@@ -800,36 +800,42 @@ final class WSS_Rest_Controller {
 			);
 		}
 
-		// No (string)/(int) casts here: a cast turns an array into "Array" and
-		// "abc" into 0, which the engine would then read as "no filter". The
-		// engine validates the raw value and answers 400 in API mode.
-		$input = [
-			'query'      => $q_str,
-			'refang'     => $this->param( $request, 'refang' ),
-			'scope'      => $scope,
-			'type'       => $this->param( $request, 'type' ) ?? 'posts',
-			'match'      => $this->param( $request, 'match' ) ?? 'auto',
-			'page'       => $this->param( $request, 'page' ) ?? 1,
-			'per_page'   => $this->param( $request, 'per_page' ) ?? WSS_Config::POSTS_PER_PAGE_MAX,
-			'statuses'   => $this->param( $request, 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES,
-			'date_range' => $this->param( $request, 'date_range' ) ?? 'any',
-			'date_from'  => $this->param( $request, 'date_from' ) ?? '',
-			'date_to'    => $this->param( $request, 'date_to' ) ?? '',
-			'author'     => $this->param( $request, 'author' ) ?? 0,
-			'post_type'  => $this->param( $request, 'post_type' ) ?? 'post',
-			'orderby'    => $this->param( $request, 'orderby' ) ?? 'date_desc',
-			'exclude'    => (array) ( $this->param( $request, 'exclude' ) ?? [] ),
-			'exclude_id' => (array) ( $this->param( $request, 'exclude_id' ) ?? [] ),
-			'url'        => $url_p,
-			'domain'     => $domain_p,
-			'host'       => $host_p,
-			'anchor'     => $anchor_p,
-			'anchor_match' => (string) ( $this->param( $request, 'anchor_match' ) ?? 'words' ),
-			'anchor_kind'  => $anchor_kind_p,
-			'post_id'    => $post_id_p,
-			'fields'     => $this->param( $request, 'fields' ),
-			'exact_total' => $this->param( $request, 'exact_total' ),
-		];
+		// Only parameters the client actually sent reach the engine. A
+		// placeholder for an absent filter (author => 0, date_from => '') used
+		// to look like a value — and after the strict validation like a bad
+		// one: an absent author must stay absent, not become 0.
+		$input = [];
+
+		foreach (
+			[
+				'q', 'refang', 'scope', 'type', 'match', 'page', 'per_page',
+				'statuses', 'date_range', 'date_from', 'date_to', 'author',
+				'post_type', 'orderby', 'exclude', 'exclude_id', 'anchor_match',
+				'anchor_kind', 'post_id', 'fields', 'exact_total',
+			] as $key
+		) {
+			if ( $this->has_param( $request, $key ) ) {
+				$input[ $key ] = $this->param( $request, $key );
+			}
+		}
+
+		$input['query'] = $q_str;
+		$input['url']   = $url_p;
+		$input['domain'] = $domain_p;
+		$input['host']  = $host_p;
+		$input['anchor'] = $anchor_p;
+
+		// Contract defaults for modes, not filters: the documented API default
+		// for `type` is "posts", and per_page defaults to the maximum page.
+		// Everything else (statuses, date_range, post_type, orderby, page,
+		// match, anchor_match) keeps the engine's own default when absent.
+		if ( ! array_key_exists( 'type', $input ) ) {
+			$input['type'] = 'posts';
+		}
+
+		if ( ! array_key_exists( 'per_page', $input ) ) {
+			$input['per_page'] = WSS_Config::POSTS_PER_PAGE_MAX;
+		}
 
 		$result = $this->engine->do_search( $input, true );
 		if ( is_wp_error( $result ) ) {
@@ -1044,14 +1050,15 @@ final class WSS_Rest_Controller {
 			);
 		}
 
-		$input = [
-			'per_page'     => $this->param( $request, 'per_page' ),
-			'post_type'    => (string) ( $this->param( $request, 'post_type' ) ?? 'post' ),
-			'statuses'     => $this->param( $request, 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES,
-			'fields'       => $this->param( $request, 'fields' ),
-			'anchor_match' => (string) ( $this->param( $request, 'anchor_match' ) ?? 'words' ),
-			'anchor_kind'  => $this->param( $request, 'anchor_kind' ),
-		];
+		// Same rule as /search: only what the client sent. The engine keeps its
+		// own defaults for post_type/statuses/anchor_match/per_page.
+		$input = [];
+
+		foreach ( [ 'per_page', 'post_type', 'statuses', 'fields', 'anchor_match', 'anchor_kind' ] as $key ) {
+			if ( $this->has_param( $request, $key ) ) {
+				$input[ $key ] = $this->param( $request, $key );
+			}
+		}
 
 		$result = $this->engine->do_links_batch( $lookups, $input, true );
 		if ( is_wp_error( $result ) ) {
@@ -1276,7 +1283,11 @@ final class WSS_Rest_Controller {
 			'name'                 => (string) $user->display_name,
 			'roles'                => array_values( (array) $user->roles ),
 			'can_search'           => $can,
-			'can_filter_by_author' => $multi,
+			// The author filter is supported for every user with can_search:
+			// it narrows within the posts that user can already see. The
+			// "of others" nuance is covered by visibility_mode/private_scope,
+			// so this flag must not be false for an author-level account.
+			'can_filter_by_author' => $can,
 			'allowed_statuses'     => WSS_Config::ALLOWED_STATUSES,
 			// shared: posts of every author in these statuses are visible,
 			// which is what duplicate checks before publishing rely on.

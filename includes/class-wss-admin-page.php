@@ -1402,7 +1402,7 @@ final class WSS_Admin_Page {
 		return [
 			[ 'id, name, roles', 'integer, string, array', __( 'Кто вызвал метод.', 'wp-smart-search' ) ],
 			[ 'can_search', 'boolean', __( 'Есть ли право на поиск (publish_posts).', 'wp-smart-search' ) ],
-			[ 'can_filter_by_author', 'boolean', __( 'Можно ли фильтровать по автору (edit_others_posts).', 'wp-smart-search' ) ],
+			[ 'can_filter_by_author', 'boolean', __( 'Поддерживается ли фильтр по автору: true для любого пользователя с can_search (фильтр сужает в пределах видимого).', 'wp-smart-search' ) ],
 			[ 'allowed_statuses', 'array', __( 'Все статусы, которые вообще поддерживает API.', 'wp-smart-search' ) ],
 			[ 'visibility_mode', 'string', __( 'shared — видны черновики всех авторов; own — только опубликованное и своё.', 'wp-smart-search' ) ],
 			[ 'visible_statuses', 'array', __( 'Какие статусы реально попадут в выдачу этого пользователя.', 'wp-smart-search' ) ],
