@@ -47,7 +47,7 @@ final class WSS_Ajax_Handler {
 
 		if ( ! check_ajax_referer( WSS_Config::NONCE_INDEX_STEP, WSS_Config::NONCE_FIELD, false ) ) {
 			WSS_Config::log_security_event( 'nonce_failed', 'ajax:index_step' );
-			wp_die( -1, 403 );
+			wp_die( -1, '', [ 'response' => 403 ] );
 		}
 
 		if ( ! WSS_Config::user_can_rebuild() ) {
@@ -129,7 +129,7 @@ final class WSS_Ajax_Handler {
 
 		if ( ! check_ajax_referer( WSS_Config::NONCE_INDEX_STOP, WSS_Config::NONCE_FIELD, false ) ) {
 			WSS_Config::log_security_event( 'nonce_failed', 'ajax:index_stop' );
-			wp_die( -1, 403 );
+			wp_die( -1, '', [ 'response' => 403 ] );
 		}
 
 		if ( ! WSS_Config::user_can_rebuild() ) {
@@ -163,7 +163,7 @@ final class WSS_Ajax_Handler {
 
 		if ( ! check_ajax_referer( WSS_Config::NONCE_ACTION, WSS_Config::NONCE_FIELD, false ) ) {
 			WSS_Config::log_security_event( 'nonce_failed', 'ajax:search' );
-			wp_die( -1, 403 );
+			wp_die( -1, '', [ 'response' => 403 ] );
 		}
 
 		if ( ! WSS_Config::user_can_search() ) {

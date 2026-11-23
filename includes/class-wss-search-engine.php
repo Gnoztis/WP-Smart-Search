@@ -23,23 +23,37 @@ final class WSS_Search_Engine {
 			$raw = WSS_Refang::refang_query( $raw );
 		}
 
-		$type = isset( $input['type'] ) ? sanitize_key( (string) $input['type'] ) : 'all';
-		if ( ! in_array( $type, [ 'all', 'tags', 'posts' ], true ) ) {
-			$type = 'all';
+		// A parameter that is present but unusable is a 400, never "no
+		// filter": `type=bogus` must not quietly become "all", a bad page is
+		// not page 1, and post_id=abc must not search every post. Admin
+		// (AJAX) callers keep the lenient fallback — the panel sends
+		// whatever the form holds.
+		$type = $this->enum_param( $input, 'type', [ 'all', 'tags', 'posts' ], 'all', 'wss_invalid_type', $is_api );
+		if ( is_wp_error( $type ) ) {
+			return $type;
 		}
 
-		$match = isset( $input['match'] ) ? sanitize_key( (string) $input['match'] ) : 'auto';
-		if ( ! in_array( $match, WSS_Config::MATCH_MODES, true ) ) {
-			$match = 'auto';
+		$match = $this->enum_param( $input, 'match', WSS_Config::MATCH_MODES, 'auto', 'wss_invalid_match', $is_api );
+		if ( is_wp_error( $match ) ) {
+			return $match;
 		}
 
-		$scope = isset( $input['scope'] ) ? sanitize_key( (string) $input['scope'] ) : WSS_Config::SCOPE_POSTS;
-		if ( ! in_array( $scope, WSS_Config::SCOPES, true ) ) {
-			$scope = WSS_Config::SCOPE_POSTS;
+		$scope = $this->enum_param( $input, 'scope', WSS_Config::SCOPES, WSS_Config::SCOPE_POSTS, 'wss_invalid_scope', $is_api );
+		if ( is_wp_error( $scope ) ) {
+			return $scope;
 		}
 
-		$page = isset( $input['page'] ) ? absint( $input['page'] ) : 1;
-		$page = max( 1, $page );
+		$page = $this->int_param( $input, 'page', 1, 'wss_invalid_page', $is_api );
+		if ( is_wp_error( $page ) ) {
+			return $page;
+		}
+
+		if ( $is_api ) {
+			$post_id_check = $this->post_id_filter( $input['post_id'] ?? null, true );
+			if ( is_wp_error( $post_id_check ) ) {
+				return $post_id_check;
+			}
+		}
 
 		// A link query may have no words at all: "all links of these posts"
 		// (post_id) and "links of a kind" (anchor_kind) are complete queries.
@@ -73,8 +87,11 @@ final class WSS_Search_Engine {
 		}
 		$filters['query'] = $raw;
 
-		$per_page = isset( $input['per_page'] ) ? absint( $input['per_page'] ) : WSS_Config::POSTS_PER_PAGE;
-		$per_page = max( 1, min( WSS_Config::POSTS_PER_PAGE_MAX, $per_page ) );
+		$per_page = $this->int_param( $input, 'per_page', WSS_Config::POSTS_PER_PAGE, 'wss_invalid_per_page', $is_api );
+		if ( is_wp_error( $per_page ) ) {
+			return $per_page;
+		}
+		$per_page = min( WSS_Config::POSTS_PER_PAGE_MAX, $per_page );
 
 		$patterns = $this->build_word_patterns( $terms );
 
@@ -148,8 +165,11 @@ final class WSS_Search_Engine {
 		}
 		$filters['query'] = '';
 
-		$per_page = isset( $base_input['per_page'] ) ? absint( $base_input['per_page'] ) : 5;
-		$per_page = max( 1, min( WSS_Config::POSTS_PER_PAGE_MAX, $per_page ) );
+		$per_page = $this->int_param( $base_input, 'per_page', 5, 'wss_invalid_per_page', $is_api );
+		if ( is_wp_error( $per_page ) ) {
+			return $per_page;
+		}
+		$per_page = min( WSS_Config::POSTS_PER_PAGE_MAX, $per_page );
 
 		$clean = $base_input;
 		foreach ( [ 'url', 'domain', 'host', 'anchor' ] as $key ) {
@@ -258,21 +278,70 @@ final class WSS_Search_Engine {
 			$statuses = WSS_Config::ALLOWED_STATUSES;
 		}
 
-		$date_range = isset( $input['date_range'] ) ? sanitize_key( (string) $input['date_range'] ) : 'any';
+		$date_range = isset( $input['date_range'] ) ? $input['date_range'] : 'any';
+		if ( $is_api && ! is_string( $date_range ) ) {
+			return new WP_Error(
+				'wss_invalid_date_range',
+				__( 'date_range должен быть строкой: any, today, week, month или year.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
+		$date_range = sanitize_key( (string) $date_range );
 		if ( ! in_array( $date_range, [ 'any', 'today', 'week', 'month', 'year' ], true ) ) {
+			if ( $is_api ) {
+				return new WP_Error(
+					'wss_invalid_date_range',
+					sprintf(
+						/* translators: %s: given value */
+						__( 'Недопустимый date_range: %s. Разрешены: any, today, week, month, year.', 'wp-smart-search' ),
+						$date_range
+					),
+					[ 'status' => 400 ]
+				);
+			}
 			$date_range = 'any';
 		}
 
 		// The author filter only narrows the result set; visibility is
 		// enforced by status_scope(), so it is safe for every user.
-		$author = isset( $input['author'] ) ? absint( $input['author'] ) : 0;
+		$author = $this->int_param( $input, 'author', 0, 'wss_invalid_author', $is_api );
+		if ( is_wp_error( $author ) ) {
+			return $author;
+		}
 
-		$orderby = isset( $input['orderby'] ) ? sanitize_key( (string) $input['orderby'] ) : 'date_desc';
+		$orderby = isset( $input['orderby'] ) ? $input['orderby'] : 'date_desc';
+		if ( $is_api && ! is_string( $orderby ) ) {
+			return new WP_Error(
+				'wss_invalid_orderby',
+				__( 'orderby должен быть строкой: date_desc или date_asc.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
+		$orderby = sanitize_key( (string) $orderby );
 		if ( ! in_array( $orderby, [ 'date_desc', 'date_asc' ], true ) ) {
+			if ( $is_api ) {
+				return new WP_Error(
+					'wss_invalid_orderby',
+					sprintf(
+						/* translators: %s: given value */
+						__( 'Недопустимый orderby: %s. Разрешены: date_desc, date_asc.', 'wp-smart-search' ),
+						$orderby
+					),
+					[ 'status' => 400 ]
+				);
+			}
 			$orderby = 'date_desc';
 		}
 
-		$post_type = isset( $input['post_type'] ) ? sanitize_key( (string) $input['post_type'] ) : 'post';
+		$post_type = isset( $input['post_type'] ) ? $input['post_type'] : 'post';
+		if ( $is_api && ! is_string( $post_type ) ) {
+			return new WP_Error(
+				'wss_invalid_post_type',
+				__( 'post_type должен быть строкой.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
+		$post_type = sanitize_key( (string) $post_type );
 		if ( $post_type === '' ) {
 			$post_type = 'post';
 		}
@@ -295,7 +364,23 @@ final class WSS_Search_Engine {
 			}
 			$ids = is_array( $input[ $key ] ) ? $input[ $key ] : [ $input[ $key ] ];
 			foreach ( $ids as $id ) {
-				$id = absint( $id );
+				if ( is_bool( $id ) || is_array( $id ) || ! is_scalar( $id )
+					|| ! preg_match( '/^[0-9]+$/', trim( (string) $id ) ) ) {
+					// An unusable exclude would silently stop excluding.
+					if ( $is_api ) {
+						return new WP_Error(
+							'wss_invalid_exclude',
+							sprintf(
+								/* translators: %s: parameter name */
+								__( 'Параметр %s должен содержать только целые id записей.', 'wp-smart-search' ),
+								$key
+							),
+							[ 'status' => 400 ]
+						);
+					}
+					continue;
+				}
+				$id = (int) $id;
 				if ( $id > 0 ) {
 					$exclude[] = $id;
 				}
@@ -304,6 +389,34 @@ final class WSS_Search_Engine {
 		$exclude = array_values( array_unique( $exclude ) );
 		if ( count( $exclude ) > WSS_Config::MAX_EXCLUDE ) {
 			$exclude = array_slice( $exclude, 0, WSS_Config::MAX_EXCLUDE );
+		}
+
+		// An unparseable date is not "any date": the filter would silently
+		// disappear and answer with the whole archive.
+		$date_from = isset( $input['date_from'] ) && is_string( $input['date_from'] ) ? trim( $input['date_from'] ) : '';
+		$date_to   = isset( $input['date_to'] ) && is_string( $input['date_to'] ) ? trim( $input['date_to'] ) : '';
+
+		if ( $is_api ) {
+			foreach ( [ 'date_from' => $date_from, 'date_to' => $date_to ] as $key => $value ) {
+				if ( $value !== '' && $this->parse_date_boundary( $value, 'date_to' === $key ) <= 0 ) {
+					return new WP_Error(
+						'wss_invalid_date',
+						sprintf(
+							/* translators: %s: parameter name */
+							__( 'Некорректная дата в %s: нужен формат YYYY-MM-DD или YYYY-MM-DDTHH:MM.', 'wp-smart-search' ),
+							$key
+						),
+						[ 'status' => 400 ]
+					);
+				}
+			}
+			if ( $date_from !== '' && $date_to !== '' && $this->parse_date_boundary( $date_from, false ) > $this->parse_date_boundary( $date_to, true ) ) {
+				return new WP_Error(
+					'wss_invalid_date',
+					__( 'date_from позже date_to.', 'wp-smart-search' ),
+					[ 'status' => 400 ]
+				);
+			}
 		}
 
 		// Honoured only when the match list had to be cut: the engine then
@@ -318,8 +431,8 @@ final class WSS_Search_Engine {
 			'orderby'     => $orderby,
 			'exclude'     => $exclude,
 			'post_type'   => $post_type,
-			'date_from'   => isset( $input['date_from'] ) ? (string) $input['date_from'] : '',
-			'date_to'     => isset( $input['date_to'] )   ? (string) $input['date_to']   : '',
+			'date_from'   => $date_from,
+			'date_to'     => $date_to,
 			'exact_total' => $exact_total,
 		];
 	}
@@ -1295,7 +1408,10 @@ final class WSS_Search_Engine {
 		$anchor_p = isset( $input['anchor'] ) && $input['anchor'] !== '' ? (string) $input['anchor'] : '';
 
 		// Links of specific posts: an audit checks one post at a time.
-		$post_ids = $this->post_id_filter( $input['post_id'] ?? null );
+		$post_ids = $this->post_id_filter( $input['post_id'] ?? null, $is_api );
+		if ( is_wp_error( $post_ids ) ) {
+			return $post_ids;
+		}
 
 		if ( $url_p !== '' ) {
 			$norm = WSS_Refang::normalize_url( $url_p );
@@ -1584,30 +1700,142 @@ final class WSS_Search_Engine {
 	}
 
 	/**
+	 * One of an allowed set, or a 400 in API mode.
+	 *
+	 * @param array    $input
+	 * @param string   $key
+	 * @param string[] $allowed
+	 * @param string   $default
+	 * @param string   $code
+	 * @param bool     $is_api
+	 * @return string|WP_Error
+	 */
+	private function enum_param( array $input, string $key, array $allowed, string $default, string $code, bool $is_api ) {
+		if ( ! isset( $input[ $key ] ) || '' === $input[ $key ] ) {
+			return $default;
+		}
+
+		$value = $input[ $key ];
+
+		if ( ! is_string( $value ) ) {
+			return $is_api
+				? new WP_Error(
+					$code,
+					sprintf(
+						/* translators: %s: parameter name */
+						__( 'Параметр %s должен быть строкой.', 'wp-smart-search' ),
+						$key
+					),
+					[ 'status' => 400 ]
+				)
+				: $default;
+		}
+
+		$value = sanitize_key( $value );
+
+		if ( in_array( $value, $allowed, true ) ) {
+			return $value;
+		}
+
+		return $is_api
+			? new WP_Error(
+				$code,
+				sprintf(
+					/* translators: 1: parameter name, 2: given value, 3: allowed values */
+					__( 'Недопустимое значение %1$s: %2$s. Разрешены: %3$s.', 'wp-smart-search' ),
+					$key,
+					$value,
+					implode( ', ', $allowed )
+				),
+				[ 'status' => 400 ]
+			)
+			: $default;
+	}
+
+	/**
+	 * A positive integer, or a 400 in API mode.
+	 *
+	 * @param array  $input
+	 * @param string $key
+	 * @param int    $default
+	 * @param string $code
+	 * @param bool   $is_api
+	 * @return int|WP_Error
+	 */
+	private function int_param( array $input, string $key, int $default, string $code, bool $is_api ) {
+		if ( ! isset( $input[ $key ] ) || '' === $input[ $key ] ) {
+			return $default;
+		}
+
+		$value = $input[ $key ];
+
+		$usable = ! is_bool( $value ) && is_scalar( $value )
+			&& preg_match( '/^[0-9]+$/', trim( (string) $value ) )
+			&& (int) $value > 0;
+
+		if ( $usable ) {
+			return (int) $value;
+		}
+
+		return $is_api
+			? new WP_Error(
+				$code,
+				sprintf(
+					/* translators: %s: parameter name */
+					__( 'Параметр %s должен быть положительным целым числом.', 'wp-smart-search' ),
+					$key
+				),
+				[ 'status' => 400 ]
+			)
+			: $default;
+	}
+
+	/**
 	 * Normalised post_id filter: null when absent, a list of ids otherwise.
 	 *
 	 * An empty list means "nothing can match" (no usable ids) and must not be
-	 * confused with "no filter".
+	 * confused with "no filter". A present but unusable id is a 400 in API
+	 * mode: dropping it would silently search every post, which is how
+	 * "post_id=abc" used to look like a valid answer.
 	 *
 	 * @param mixed $value Scalar, comma separated string or array.
-	 * @return int[]|null
+	 * @param bool  $is_api
+	 * @return int[]|null|WP_Error
 	 */
-	private function post_id_filter( $value ) {
+	private function post_id_filter( $value, bool $is_api = false ) {
 		if ( null === $value || '' === $value || [] === $value ) {
 			return null;
 		}
 
-		$raw = is_array( $value ) ? $value : [ $value ];
-		$ids = [];
+		$raw     = is_array( $value ) ? $value : [ $value ];
+		$ids     = [];
+		$invalid = [];
 
 		foreach ( $raw as $id ) {
-			if ( is_array( $id ) ) {
+			if ( is_bool( $id ) || is_array( $id ) || ! is_scalar( $id )
+				|| ! preg_match( '/^[0-9]+$/', trim( (string) $id ) )
+				|| (int) $id <= 0 ) {
+				$invalid[] = is_scalar( $id ) ? (string) $id : '?';
 				continue;
 			}
-			$id = absint( $id );
-			if ( $id > 0 ) {
-				$ids[] = $id;
+
+			$ids[] = (int) $id;
+		}
+
+		if ( ! empty( $invalid ) ) {
+			if ( $is_api ) {
+				return new WP_Error(
+					'wss_invalid_post_id',
+					sprintf(
+						/* translators: %s: given values */
+						__( 'post_id должен быть положительным целым числом (или списком): %s.', 'wp-smart-search' ),
+						implode( ', ', $invalid )
+					),
+					[ 'status' => 400 ]
+				);
 			}
+
+			return null;
 		}
 
 		$ids = array_values( array_unique( $ids ) );

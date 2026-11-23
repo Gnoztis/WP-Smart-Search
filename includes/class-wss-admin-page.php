@@ -22,19 +22,19 @@ final class WSS_Admin_Page {
 	public function handle_index_recreate(): void {
 		if ( ! WSS_Config::user_can_search() ) {
 			WSS_Config::log_security_event( 'object_denied', 'admin_page' );
-			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), 403 );
+			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), '', [ 'response' => 403 ] );
 		}
 
 		if ( ! WSS_Config::user_can_rebuild() ) {
 			WSS_Config::log_security_event( 'cap_denied', 'admin:index_recreate' );
-			wp_die( esc_html__( 'Пересоздание индекса доступно администратору сайта.', 'wp-smart-search' ), 403 );
+			wp_die( esc_html__( 'Пересоздание индекса доступно администратору сайта.', 'wp-smart-search' ), '', [ 'response' => 403 ] );
 		}
 
 		check_admin_referer( 'wss_index_recreate' );
 
 		$confirm = isset( $_POST['wss_recreate_confirm'] ) ? (string) wp_unslash( $_POST['wss_recreate_confirm'] ) : '';
 		if ( '1' !== $confirm ) {
-			wp_die( esc_html__( 'Подтвердите, что индекс будет удалён.', 'wp-smart-search' ), 400 );
+			wp_die( esc_html__( 'Подтвердите, что индекс будет удалён.', 'wp-smart-search' ), '', [ 'response' => 400 ] );
 		}
 
 		$result = WSS_Links_Indexer::recreate();
@@ -64,12 +64,12 @@ final class WSS_Admin_Page {
 	public function handle_index_rebuild(): void {
 		if ( ! WSS_Config::user_can_search() ) {
 			WSS_Config::log_security_event( 'object_denied', 'admin_page' );
-			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), 403 );
+			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), '', [ 'response' => 403 ] );
 		}
 
 		if ( ! WSS_Config::user_can_rebuild() ) {
 			WSS_Config::log_security_event( 'cap_denied', 'admin:index_rebuild' );
-			wp_die( esc_html__( 'Переиндексация доступна администратору сайта.', 'wp-smart-search' ), 403 );
+			wp_die( esc_html__( 'Переиндексация доступна администратору сайта.', 'wp-smart-search' ), '', [ 'response' => 403 ] );
 		}
 
 		check_admin_referer( 'wss_index_rebuild' );
@@ -288,7 +288,7 @@ final class WSS_Admin_Page {
 	public function render(): void {
 		if ( ! WSS_Config::user_can_search() ) {
 			WSS_Config::log_security_event( 'object_denied', 'admin_page' );
-			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), 403 );
+			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), '', [ 'response' => 403 ] );
 		}
 
 		$initial_query  = $this->initial_query();
@@ -1464,6 +1464,16 @@ final class WSS_Admin_Page {
 			[ 'wss_invalid_taxonomy', '400', __( 'Таксономия не из post_tag, category, any.', 'wp-smart-search' ) ],
 			[ 'wss_too_many_slugs', '400', __( 'Больше 50 слагов за один запрос.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_post_type', '400', __( 'post_type не зарегистрирован.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_type', '400', __( 'type не из all, tags, posts.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_match', '400', __( 'match не из auto, exact, words.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_scope', '400', __( 'scope не из posts, links, all.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_page', '400', __( 'page не положительное целое.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_per_page', '400', __( 'per_page не положительное целое.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_author', '400', __( 'author не положительное целое.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_date_range', '400', __( 'date_range не из any, today, week, month, year.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_date', '400', __( 'date_from/date_to не разбираются как дата или date_from позже date_to.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_orderby', '400', __( 'orderby не из date_desc, date_asc.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_exclude', '400', __( 'exclude/exclude_id содержит не целое id.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_anchor_match', '400', __( 'anchor_match не из words, exact, substring.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_anchor_kind', '400', __( 'anchor_kind не из phrase, url, empty, unknown.', 'wp-smart-search' ) ],
 			[ 'wss_empty', '400', __( 'Пустой q при поиске по записям.', 'wp-smart-search' ) ],

@@ -780,21 +780,24 @@ final class WSS_Rest_Controller {
 			);
 		}
 
+		// No (string)/(int) casts here: a cast turns an array into "Array" and
+		// "abc" into 0, which the engine would then read as "no filter". The
+		// engine validates the raw value and answers 400 in API mode.
 		$input = [
 			'query'      => $q_str,
 			'refang'     => $this->param( $request, 'refang' ),
 			'scope'      => $scope,
-			'type'       => (string) ( $this->param( $request, 'type' ) ?? 'posts' ),
-			'match'      => (string) ( $this->param( $request, 'match' ) ?? 'auto' ),
-			'page'       => (int) ( $this->param( $request, 'page' ) ?? 1 ),
-			'per_page'   => (int) ( $this->param( $request, 'per_page' ) ?? WSS_Config::POSTS_PER_PAGE_MAX ),
-			'statuses'   => ( $this->param( $request, 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES ),
-			'date_range' => (string) ( $this->param( $request, 'date_range' ) ?? 'any' ),
-			'date_from'  => (string) ( $this->param( $request, 'date_from' ) ?? '' ),
-			'date_to'    => (string) ( $this->param( $request, 'date_to' ) ?? '' ),
-			'author'     => (int) ( $this->param( $request, 'author' ) ?? 0 ),
-			'post_type'  => (string) ( $this->param( $request, 'post_type' ) ?? 'post' ),
-			'orderby'    => (string) ( $this->param( $request, 'orderby' ) ?? 'date_desc' ),
+			'type'       => $this->param( $request, 'type' ) ?? 'posts',
+			'match'      => $this->param( $request, 'match' ) ?? 'auto',
+			'page'       => $this->param( $request, 'page' ) ?? 1,
+			'per_page'   => $this->param( $request, 'per_page' ) ?? WSS_Config::POSTS_PER_PAGE_MAX,
+			'statuses'   => $this->param( $request, 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES,
+			'date_range' => $this->param( $request, 'date_range' ) ?? 'any',
+			'date_from'  => $this->param( $request, 'date_from' ) ?? '',
+			'date_to'    => $this->param( $request, 'date_to' ) ?? '',
+			'author'     => $this->param( $request, 'author' ) ?? 0,
+			'post_type'  => $this->param( $request, 'post_type' ) ?? 'post',
+			'orderby'    => $this->param( $request, 'orderby' ) ?? 'date_desc',
 			'exclude'    => (array) ( $this->param( $request, 'exclude' ) ?? [] ),
 			'exclude_id' => (array) ( $this->param( $request, 'exclude_id' ) ?? [] ),
 			'url'        => $url_p,
