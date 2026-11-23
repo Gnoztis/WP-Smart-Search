@@ -874,6 +874,10 @@ final class WSS_Admin_Page {
 				<?php esc_html_e( 'Слова запроса ищутся по основам и объединяются по «И»: «обход песочницы» находит «обходу песочницу». Если совпадений больше предела, список обрезается и posts.truncated = true, а total остаётся точным.', 'wp-smart-search' ); ?>
 			</p>
 
+			<p class="wss-panel-text">
+				<?php esc_html_e( 'То же правило пустых значений: author, post_id, date_from, date_to, type, match, scope, post_type, exclude переданные как null или "" дают 400, а не «без фильтра» (author: null раньше означал «все авторы», date_from: null — «весь архив»). Пустой q без фильтра по ссылке — 400 wss_empty.', 'wp-smart-search' ); ?>
+			</p>
+
 			<?php
 			$this->render_doc_table(
 				[
@@ -904,6 +908,10 @@ final class WSS_Admin_Page {
 
 			<p class="wss-panel-text">
 				<?php esc_html_e( 'Опечатка не превращается в «без фильтра»: необъявленный параметр (например, slugs во множественном числе) — 400 со списком допустимых, а slug принимает и строку через запятую, и JSON-массив строк. Пустой массив, null/число/вложенный массив в нём или больше 50 элементов — 400.', 'wp-smart-search' ); ?>
+			</p>
+
+			<p class="wss-panel-text">
+				<?php esc_html_e( 'Пустое значение — не фильтр. Для сужающих параметров (slug, search, prefix, post_id) null и пустая строка дают 400: иначе запрос молча означает «всё» (известный случай — {"slug": null} отвечал всей таксономией). taxonomy — это режим: null или пустая строка дают post_tag. page, per_page, fields, include_counts — значения по умолчанию, потому что они не расширяют выборку. Не присылайте slug: "" — либо уберите параметр, либо передайте слаги.', 'wp-smart-search' ); ?>
 			</p>
 
 			<?php

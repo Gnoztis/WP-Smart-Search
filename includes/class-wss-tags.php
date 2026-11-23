@@ -49,18 +49,48 @@ final class WSS_Tags {
 	/**
 	 * Answers one /tags request.
 	 *
-	 * Rule of the endpoint: a parameter that is present but cannot be applied
-	 * is a 400, never "no filter". An unusable slug, search, prefix, taxonomy
-	 * or post_id must not silently widen the query to the whole taxonomy — a
-	 * typo has to look like an error, not like a valid answer.
+	 * Presence is decided by array_key_exists(), not isset(): `{"slug": null}`
+	 * is a *present* parameter, and a narrowing filter can never be empty —
+	 * otherwise the request silently means "give me everything".
 	 *
-	 * @param array $input Raw request parameters.
+	 * The matrix:
+	 *  - narrowing filters (slug, search, prefix, post_id): null and "" are a
+	 *    400 (wss_invalid_slug, wss_invalid_search, wss_invalid_prefix,
+	 *    wss_invalid_post_id);
+	 *  - taxonomy: null or "" means the documented default post_tag — it is a
+	 *    mode, not a filter;
+	 *  - page, per_page, fields, include_counts: null or "" means the default,
+	 *    because they cannot widen the result set.
+	 *
+	 * @param array $input Raw request parameters; absent keys are absent.
 	 * @return array|WP_Error
 	 */
 	public function query( array $input ) {
-		$slugs    = $this->parse_slugs( $input['slug'] ?? null );
+		$slugs = array_key_exists( 'slug', $input ) ? $this->parse_slugs( $input['slug'] ) : null;
 		if ( is_wp_error( $slugs ) ) {
 			return $slugs;
+		}
+
+		foreach ( [ 'search' => 'wss_invalid_search', 'prefix' => 'wss_invalid_prefix' ] as $key => $code ) {
+			if ( ! array_key_exists( $key, $input ) ) {
+				continue;
+			}
+
+			$value = $input[ $key ];
+
+			// " " is not a filter either: trimming it would turn the
+			// parameter into an absent one and answer with every term.
+			if ( null === $value || ! is_string( $value ) || '' === trim( $value ) ) {
+				return new WP_Error(
+					$code,
+					sprintf(
+						/* translators: %s: parameter name */
+						__( 'Параметр %s передан пустым: фильтр не может означать «всё». Уберите параметр или передайте значение.', 'wp-smart-search' ),
+						$key
+					),
+					[ 'status' => 400 ]
+				);
+			}
 		}
 
 		$search = $this->text_param( $input['search'] ?? null, 'search', 'wss_invalid_search' );
@@ -73,35 +103,60 @@ final class WSS_Tags {
 			return $prefix;
 		}
 
+		// taxonomy is a mode: null or "" is the documented default.
 		$taxonomy = $this->text_param( $input['taxonomy'] ?? null, 'taxonomy', 'wss_invalid_taxonomy' );
 		if ( is_wp_error( $taxonomy ) ) {
 			return $taxonomy;
 		}
 
 		$taxonomy = sanitize_key( $taxonomy );
-		$counts   = $this->to_bool( $input['include_counts'] ?? null, true );
-		$page     = max( 1, (int) ( $input['page'] ?? 1 ) );
-		$per_page = (int) ( $input['per_page'] ?? WSS_Config::TAGS_PER_PAGE );
+		if ( '' === $taxonomy ) {
+			// Only null/"" mean the documented default; a value made of
+			// unusable characters is not a mode, it is a client bug.
+			if ( array_key_exists( 'taxonomy', $input ) && is_string( $input['taxonomy'] ) && '' !== trim( $input['taxonomy'] ) ) {
+				return new WP_Error(
+					'wss_invalid_taxonomy',
+					__( 'taxonomy не содержит допустимых символов имени таксономии.', 'wp-smart-search' ),
+					[ 'status' => 400 ]
+				);
+			}
+			$taxonomy = 'post_tag';
+		}
+		// page/per_page may be null/"" (the default), but a present value
+		// that cannot be a number is not "page 1" — it is a client error.
+		$page = $this->int_or_default( $input, 'page', 1, 'wss_invalid_page' );
+		if ( is_wp_error( $page ) ) {
+			return $page;
+		}
+
+		$per_page = $this->int_or_default( $input, 'per_page', WSS_Config::TAGS_PER_PAGE, 'wss_invalid_per_page' );
+		if ( is_wp_error( $per_page ) ) {
+			return $per_page;
+		}
 		$per_page = max( 1, min( WSS_Config::TAGS_PER_PAGE_MAX, $per_page ) );
-		$fields   = $this->parse_fields( $input['fields'] ?? null );
+
+		$counts = $this->to_bool( $input['include_counts'] ?? null, true );
+		$fields = $this->parse_fields( $input['fields'] ?? null );
 
 		if ( is_wp_error( $fields ) ) {
 			return $fields;
 		}
 
 		// post_id is either absent or a positive integer. "abc", 1.5, -1, 0,
-		// true or an array is a client bug and must be a 400 — silently turning
-		// it into "no filter" answered with the whole taxonomy (40 759 terms).
-		$post_id_raw = $input['post_id'] ?? null;
-		$post_id     = 0;
+		// true, an array — and null/"" — is a client bug and must be a 400:
+		// silently turning it into "no filter" answered with the whole
+		// taxonomy (40 759 terms).
+		$post_id = 0;
 
-		if ( null !== $post_id_raw && '' !== $post_id_raw ) {
-			if ( is_bool( $post_id_raw ) || ! is_scalar( $post_id_raw )
+		if ( array_key_exists( 'post_id', $input ) ) {
+			$post_id_raw = $input['post_id'];
+
+			if ( null === $post_id_raw || '' === $post_id_raw || is_bool( $post_id_raw ) || ! is_scalar( $post_id_raw )
 				|| ! preg_match( '/^[0-9]+$/', trim( (string) $post_id_raw ) )
 				|| (int) $post_id_raw <= 0 ) {
 				return new WP_Error(
 					'wss_invalid_post_id',
-					__( 'post_id должен быть положительным целым числом.', 'wp-smart-search' ),
+					__( 'post_id должен быть положительным целым числом; пустое значение фильтром не является.', 'wp-smart-search' ),
 					[ 'status' => 400 ]
 				);
 			}
@@ -385,8 +440,14 @@ final class WSS_Tags {
 	 * @return string[]|WP_Error|null
 	 */
 	private function parse_slugs( $value ) {
+		// A present but null/empty slug is not "absent": a narrowing filter
+		// can never be empty, otherwise the request means "all terms".
 		if ( null === $value || '' === $value ) {
-			return null;
+			return new WP_Error(
+				'wss_invalid_slug',
+				__( 'Параметр slug передан пустым: фильтр не может означать «всё». Уберите параметр или передайте слаги.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
 		}
 
 		if ( is_array( $value ) ) {
@@ -482,6 +543,43 @@ final class WSS_Tags {
 		}
 
 		return trim( $value );
+	}
+
+	/**
+	 * Positive integer parameter, or its default when absent/null/"".
+	 *
+	 * @param array  $input
+	 * @param string $key
+	 * @param int    $default
+	 * @param string $code
+	 * @return int|WP_Error
+	 */
+	private function int_or_default( array $input, string $key, int $default, string $code ) {
+		if ( ! array_key_exists( $key, $input ) ) {
+			return $default;
+		}
+
+		$value = $input[ $key ];
+
+		if ( null === $value || '' === $value || ( is_string( $value ) && '' === trim( $value ) ) ) {
+			return $default;
+		}
+
+		if ( is_bool( $value ) || ! is_scalar( $value )
+			|| ! preg_match( '/^[0-9]+$/', trim( (string) $value ) )
+			|| (int) $value < 1 ) {
+			return new WP_Error(
+				$code,
+				sprintf(
+					/* translators: %s: parameter name */
+					__( 'Параметр %s должен быть положительным целым числом.', 'wp-smart-search' ),
+					$key
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
+		return (int) $value;
 	}
 
 	/**

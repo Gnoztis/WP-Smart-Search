@@ -733,6 +733,26 @@ final class WSS_Rest_Controller {
 			);
 		}
 
+		// A narrowing filter that is present but null/empty would silently
+		// mean "no filter" — author: null used to search every author,
+		// date_from: null every date. Same matrix as /tags.
+		$empty = $this->reject_empty_filters( $request, [
+			'author'     => 'wss_invalid_author',
+			'post_id'    => 'wss_invalid_post_id',
+			'date_from'  => 'wss_invalid_date',
+			'date_to'    => 'wss_invalid_date',
+			'type'       => 'wss_invalid_type',
+			'match'      => 'wss_invalid_match',
+			'scope'      => 'wss_invalid_scope',
+			'post_type'  => 'wss_invalid_post_type',
+			'exclude'    => 'wss_invalid_exclude',
+			'exclude_id' => 'wss_invalid_exclude',
+			'statuses'   => 'wss_invalid_statuses',
+		] );
+		if ( $empty ) {
+			return $empty;
+		}
+
 		$q_raw = $this->param( $request, 'q' );
 		$q_str = is_string( $q_raw ) ? trim( (string) $q_raw ) : '';
 
@@ -854,6 +874,69 @@ final class WSS_Rest_Controller {
 	}
 
 	/**
+	 * Whether the request carries the parameter at all.
+	 *
+	 * `{"slug": null}` is a *present* parameter: isset() would say otherwise
+	 * and the request would silently become "no filter".
+	 *
+	 * @param WP_REST_Request $request
+	 * @param string          $key
+	 */
+	private function has_param( WP_REST_Request $request, string $key ): bool {
+		foreach ( [ $request->get_query_params(), $request->get_body_params(), $request->get_json_params() ] as $params ) {
+			if ( is_array( $params ) && array_key_exists( $key, $params ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Present but empty narrowing filters are a 400.
+	 *
+	 * The matrix: a filter that narrows the result (slug, search, prefix,
+	 * post_id, author, dates, type, match, scope, post_type, exclude) can
+	 * never be null or "" — otherwise the request silently means "everything".
+	 * Parameters that cannot widen the answer (page, per_page, fields,
+	 * include_counts) and modes (taxonomy) keep their documented defaults.
+	 *
+	 * @param WP_REST_Request $request
+	 * @param array<string,string> $codes Parameter => error code.
+	 * @return WP_Error|null
+	 */
+	private function reject_empty_filters( WP_REST_Request $request, array $codes ) {
+		foreach ( $codes as $key => $code ) {
+			if ( ! $this->has_param( $request, $key ) ) {
+				continue;
+			}
+
+			$value = $this->param( $request, $key );
+
+			$empty = null === $value
+				|| '' === $value
+				|| ( is_string( $value ) && '' === trim( $value ) )
+				|| ( is_array( $value ) && [] === $value );
+
+			if ( ! $empty ) {
+				continue;
+			}
+
+			return new WP_Error(
+				$code,
+				sprintf(
+					/* translators: %s: parameter name */
+					__( 'Параметр %s передан пустым: фильтр не может означать «всё». Уберите параметр или передайте значение.', 'wp-smart-search' ),
+					$key
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
+		return null;
+	}
+
+	/**
 	 * Single engine error format: wss_* code, status from data (400 by default).
 	 */
 	private function as_rest_error( WP_Error $error ): WP_Error {
@@ -882,18 +965,58 @@ final class WSS_Rest_Controller {
 			);
 		}
 
+		$empty = $this->reject_empty_filters( $request, [
+			'author'     => 'wss_invalid_author',
+			'date_from'  => 'wss_invalid_date',
+			'date_to'    => 'wss_invalid_date',
+			'type'       => 'wss_invalid_type',
+			'match'      => 'wss_invalid_match',
+			'scope'      => 'wss_invalid_scope',
+			'post_type'  => 'wss_invalid_post_type',
+			'exclude'    => 'wss_invalid_exclude',
+			'exclude_id' => 'wss_invalid_exclude',
+			'statuses'   => 'wss_invalid_statuses',
+		] );
+		if ( $empty ) {
+			return $empty;
+		}
+
 		$map     = [ 'domains' => 'domain', 'hosts' => 'host', 'urls' => 'url', 'anchors' => 'anchor' ];
 		$lookups = [];
 		$total   = 0;
 
 		foreach ( $map as $param => $type ) {
-			$values = $this->param( $request, $param );
-			if ( ! is_array( $values ) ) {
+			if ( ! $this->has_param( $request, $param ) ) {
 				continue;
 			}
+
+			$values = $this->param( $request, $param );
+
+			// Present but not a list: silently skipping it would turn the
+			// parameter into "no filter" (the same trap as slug: null).
+			if ( ! is_array( $values ) ) {
+				return new WP_Error(
+					'wss_invalid_lookup',
+					sprintf(
+						/* translators: %s: parameter name */
+						__( 'Параметр %s должен быть массивом строк.', 'wp-smart-search' ),
+						$param
+					),
+					[ 'status' => 400 ]
+				);
+			}
+
 			foreach ( $values as $value ) {
 				if ( ! is_string( $value ) ) {
-					continue;
+					return new WP_Error(
+						'wss_invalid_lookup',
+						sprintf(
+							/* translators: %s: parameter name */
+							__( 'Параметр %s должен содержать только строки.', 'wp-smart-search' ),
+							$param
+						),
+						[ 'status' => 400 ]
+					);
 				}
 				$value = trim( $value );
 				if ( $value === '' ) {
@@ -1100,17 +1223,16 @@ final class WSS_Rest_Controller {
 			);
 		}
 
-		$result = $this->tags->query( [
-			'slug'           => $this->param( $request, 'slug' ),
-			'search'         => $this->param( $request, 'search' ),
-			'prefix'         => $this->param( $request, 'prefix' ),
-			'post_id'        => $this->param( $request, 'post_id' ),
-			'taxonomy'       => $this->param( $request, 'taxonomy' ),
-			'include_counts' => $this->param( $request, 'include_counts' ),
-			'page'           => $this->param( $request, 'page' ),
-			'per_page'       => $this->param( $request, 'per_page' ),
-			'fields'         => $this->param( $request, 'fields' ),
-		] );
+		// Only the keys the request actually carries: WSS_Tags decides
+		// presence with array_key_exists(), so a null slug must reach it.
+		$input = [];
+		foreach ( [ 'slug', 'search', 'prefix', 'post_id', 'taxonomy', 'include_counts', 'page', 'per_page', 'fields' ] as $key ) {
+			if ( $this->has_param( $request, $key ) ) {
+				$input[ $key ] = $this->param( $request, $key );
+			}
+		}
+
+		$result = $this->tags->query( $input );
 
 		if ( is_wp_error( $result ) ) {
 			return $this->as_rest_error( $result );

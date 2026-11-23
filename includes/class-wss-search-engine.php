@@ -341,8 +341,18 @@ final class WSS_Search_Engine {
 				[ 'status' => 400 ]
 			);
 		}
-		$post_type = sanitize_key( (string) $post_type );
+		$post_type_raw = is_string( $post_type ) ? $post_type : '';
+		$post_type     = sanitize_key( $post_type_raw );
 		if ( $post_type === '' ) {
+			// Present but unusable (e.g. only non-ASCII characters): the name
+			// cannot be applied, so it is not "the default type".
+			if ( $is_api && '' !== trim( $post_type_raw ) ) {
+				return new WP_Error(
+					'wss_invalid_post_type',
+					__( 'post_type не содержит допустимых символов имени типа записи.', 'wp-smart-search' ),
+					[ 'status' => 400 ]
+				);
+			}
 			$post_type = 'post';
 		}
 		if ( $is_api && ! post_type_exists( $post_type ) ) {
@@ -398,7 +408,7 @@ final class WSS_Search_Engine {
 
 		if ( $is_api ) {
 			foreach ( [ 'date_from' => $date_from, 'date_to' => $date_to ] as $key => $value ) {
-				if ( $value !== '' && $this->parse_date_boundary( $value, 'date_to' === $key ) <= 0 ) {
+				if ( $value !== '' && ! preg_match( '/^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?$/', $value ) ) {
 					return new WP_Error(
 						'wss_invalid_date',
 						sprintf(
