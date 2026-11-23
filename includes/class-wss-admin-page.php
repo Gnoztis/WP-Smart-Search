@@ -492,9 +492,9 @@ final class WSS_Admin_Page {
 
 					<?php if ( ! $index_status['done'] && 0 === (int) $index_status['cron']['next'] ) : ?>
 						<div class="wss-index-alert" role="alert">
-							<p class="wss-index-alert-title"><?php esc_html_e( 'Фоновая пересборка не запланирована.', 'wp-smart-search' ); ?></p>
+							<p class="wss-index-alert-title"><?php esc_html_e( 'Не удалось запланировать фоновую пересборку.', 'wp-smart-search' ); ?></p>
 							<p class="wss-index-alert-text">
-								<?php esc_html_e( 'Задача не завершена, но следующего запуска в расписании нет: цепочка оборвалась. Запустите вручную «Доиндексировать из браузера» или wp wss index rebuild --continue. Если cron работает снаружи (DISABLE_WP_CRON), проверьте, что внешний скрипт вызывает wp-cron.php.', 'wp-smart-search' ); ?>
+								<?php esc_html_e( 'Задача не завершена, а следующего запуска в расписании нет: обычно это значит, что планирование cron заблокировано фильтром (pre_schedule_event) или таблица cron повреждена. Запустите вручную: «Доиндексировать из браузера» или wp wss index rebuild --continue. При внешнем cron проверьте, что скрипт вызывает wp-cron.php.', 'wp-smart-search' ); ?>
 							</p>
 						</div>
 					<?php endif; ?>

@@ -721,15 +721,61 @@
 			indexRelease();
 		}
 
-		/* Frees WP-Cron again; the cursor stays, so a restart continues. */
-		function indexRelease() {
+		/* Frees WP-Cron again; the cursor stays, so a restart continues.
+		   `beacon` is used when the page is going away: a normal AJAX call
+		   would be cancelled by the browser. */
+		function indexRelease(mode) {
+			var data = {
+				action: WSS.indexStopAction,
+				nonce:  WSS.indexStopNonce
+			};
+
+			if (mode === 'beacon' && navigator.sendBeacon) {
+				var body = new FormData();
+				body.append('action', data.action);
+				body.append('nonce', data.nonce);
+				if (navigator.sendBeacon(WSS.ajaxUrl, body)) {
+					return;
+				}
+			}
+
+			if (mode === 'beacon' && window.fetch) {
+				var params = new URLSearchParams();
+				params.append('action', data.action);
+				params.append('nonce', data.nonce);
+				fetch(WSS.ajaxUrl, {
+					method: 'POST',
+					body: params,
+					credentials: 'same-origin',
+					keepalive: true
+				});
+				return;
+			}
+
 			$.ajax({
 				url:      WSS.ajaxUrl,
 				type:     'POST',
 				dataType: 'json',
-				data: {
-					action: WSS.indexStopAction,
-					nonce:  WSS.indexStopNonce
+				data:     data
+			});
+		}
+
+		/* The tab is going away (closed, hidden, bfcache): release the marker
+		   now so cron can pick the job up immediately instead of waiting for
+		   the five-minute TTL. */
+		function indexReleaseOnHide() {
+			if (!indexActive) {
+				return;
+			}
+			indexReset();
+			indexRelease('beacon');
+		}
+
+		if (window.addEventListener) {
+			window.addEventListener('pagehide', indexReleaseOnHide);
+			document.addEventListener('visibilitychange', function () {
+				if (document.visibilityState === 'hidden') {
+					indexReleaseOnHide();
 				}
 			});
 		}
@@ -765,6 +811,9 @@
 
 				if (data.done) {
 					indexReset();
+					// The run is over: no reason to keep cron blocked for the
+					// rest of the marker TTL.
+					indexRelease();
 					$indexText.text(data.message || WSS.i18n.indexDone);
 					return;
 				}

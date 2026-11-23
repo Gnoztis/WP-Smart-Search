@@ -83,6 +83,55 @@ final class WSS_Index_Backfill {
 		add_action( self::HOOK, [ $this, 'run' ] );
 		add_action( 'init', [ $this, 'maybe_activate' ], 20 );
 		add_action( 'init', [ __CLASS__, 'maybe_fix_autoload' ], 5 );
+		// Self-healing: an abandoned browser run must not leave the job
+		// unfinished and unscheduled forever.
+		add_action( 'admin_init', [ __CLASS__, 'maybe_reschedule' ] );
+	}
+
+	/**
+	 * Scheduled fallback for an unfinished job.
+	 *
+	 * The browser drives the rebuild with `start( false )`, so no cron event is
+	 * created on purpose. If the tab is closed mid-run the runner marker simply
+	 * expires and nobody resumes the job: it stays `done = false` and the admin
+	 * shows a permanent warning. This event is placed past the marker TTL, so a
+	 * live browser is never disturbed (run() skips while the marker is fresh)
+	 * and an abandoned job resumes within about six minutes.
+	 *
+	 * @return bool True when an event was scheduled.
+	 */
+	public static function schedule_fallback(): bool {
+		if ( wp_next_scheduled( self::HOOK ) ) {
+			return false;
+		}
+
+		return (bool) wp_schedule_single_event(
+			time() + self::RUNNER_TTL + 60,
+			self::HOOK
+		);
+	}
+
+	/**
+	 * Reschedules an unfinished job that lost its cron event.
+	 *
+	 * Runs on admin_init: a job must never be left with `done = false` and no
+	 * event at all. The warning in the admin is meant to be transient — it may
+	 * only survive when scheduling itself is blocked.
+	 */
+	public static function maybe_reschedule(): void {
+		if ( self::browser_active() || wp_next_scheduled( self::HOOK ) ) {
+			return;
+		}
+
+		$state = self::state();
+
+		if ( ! empty( $state['done'] ) ) {
+			return;
+		}
+
+		if ( self::schedule_fallback() ) {
+			self::flush_status();
+		}
 	}
 
 	/* ============================================================
@@ -344,6 +393,12 @@ final class WSS_Index_Backfill {
 		// The browser is the only driver while its marker is fresh; cron
 		// must not touch the cursor or compete for the lock.
 		if ( self::browser_active() ) {
+			// Keep exactly one fallback event pending: the one that fires here
+			// was consumed, and a browser that dies next minute must not leave
+			// the job unscheduled.
+			if ( $reschedule ) {
+				self::schedule_fallback();
+			}
 			return 'browser';
 		}
 
@@ -552,6 +607,11 @@ final class WSS_Index_Backfill {
 
 		if ( $finished ) {
 			self::flush_status();
+		} else {
+			// The browser owns the run, but a closed tab must not orphan the
+			// job: keep one fallback event past the marker TTL. run() skips
+			// while the marker is fresh, so a live browser is not disturbed.
+			self::schedule_fallback();
 		}
 
 		return [
