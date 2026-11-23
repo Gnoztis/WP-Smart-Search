@@ -506,7 +506,12 @@ final class WSS_Index_Backfill {
 		$next_batch = $partial ? self::smaller_batch( $limit ) : $limit;
 
 		$next = [
-			'done'          => (bool) ( $state['done'] ?? true ),
+			// A step that did not reach the end means the job is running, even
+			// when the previous run had finished. Leaving the stale `true` here
+			// made start() treat the next click as "begin a new job" and reset
+			// the cursor to zero, so every press walked the first few hundred
+			// posts again instead of continuing.
+			'done'          => false,
 			'cursor'        => $new_cursor,
 			'processed'     => (int) $state['processed'] + $processed,
 			'errors'        => (int) $state['errors'] + $errors,
