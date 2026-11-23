@@ -1412,6 +1412,10 @@ final class WSS_Rest_Controller {
 			// also have read_private_posts).
 			'private_scope'        => $all_statuses ? 'all' : 'own',
 			'max_per_page'         => WSS_Config::POSTS_PER_PAGE_MAX,
+			// scheduled_only enumerates future posts without a text query, so
+			// a page may hold more items. max_per_page stays 50: raising it
+			// would make ordinary clients ask for 100 and get a 400.
+			'max_per_page_scheduled' => WSS_Config::SCHEDULED_PER_PAGE_MAX,
 			// A broader query stops at these many matched posts; the response
 			// then carries posts.truncated = true.
 			'max_matched_posts'    => WSS_Config::MAX_MATCHED_POSTS,

@@ -169,8 +169,11 @@ final class WSS_Search_Engine {
 				);
 
 				if ( null !== $post_fields ) {
+					// Not a static closure: it calls $this->project_post_fields().
+					// A `static fn` cannot use $this and PHP throws
+					// "Using $this when not in object context" (a 500).
 					$payload['posts']['items'] = array_map(
-						static fn( $item ) => $this->project_post_fields( $item, $post_fields ),
+						fn( $item ) => $this->project_post_fields( $item, $post_fields ),
 						$payload['posts']['items']
 					);
 				}
@@ -1996,7 +1999,14 @@ final class WSS_Search_Engine {
 		$invalid = [];
 
 		foreach ( $fields as $field ) {
-			if ( ! is_string( $field ) || '' === $field ) {
+			// A non-string entry is a client bug, not "no fields": [null] or
+			// [["a"]] must be a 400, not a silent "all fields".
+			if ( ! is_string( $field ) ) {
+				$invalid[] = is_scalar( $field ) ? (string) $field : '?';
+				continue;
+			}
+
+			if ( '' === $field ) {
 				continue;
 			}
 
