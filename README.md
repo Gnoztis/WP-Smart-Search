@@ -4,7 +4,7 @@
 админке и REST API (Application Password) для внешних инструментов —
 дедупликации, аудита источников, внутренних ссылок.
 
-Версия 2.9.1. Требуется WordPress 7.0+, PHP 8.0+ (WordPress 7.0 не работает
+Версия 2.9.2. Требуется WordPress 7.0+, PHP 8.0+ (WordPress 7.0 не работает
 на PHP ниже 7.4 — плагин требует 8.0).
 
 ## Установка
@@ -48,10 +48,28 @@
 в админке: параметры `/search`, тело и ответ `/links/batch`, поля `/me`,
 лимиты и таблица кодов ошибок.
 
-Аутентификация — только заголовок `Authorization: Basic …` с
-[Application Password](https://wordpress.org/documentation/article/application-passwords/).
-Cookie-аутентификация для этих маршрутов не поддерживается. Минимальная
-роль — та, у которой есть `publish_posts` (Автор и выше).
+Аутентификация — как у любого запроса к REST WordPress: логин и
+[Application Password](https://wordpress.org/documentation/article/application-passwords/)
+по Basic. Пароль приложения создаётся в профиле: **Пользователи → Профиль →
+Application Passwords**, имя произвольное, показывается один раз.
+
+```bash
+curl -u 'login:xxxx xxxx xxxx xxxx xxxx xxxx' \
+  "https://example.com/wp-json/wss/v1/me"
+```
+
+- **HTTPS обязателен**: WordPress не отдаёт Application Passwords по http.
+- Заголовок `Authorization: Basic …` — основной способ; если хост не передаёт
+  его в PHP (без `CGIPassAuth`), core читает `PHP_AUTH_USER`/`PHP_AUTH_PW`, и
+  плагин считает такие креды присутствующими. Для Apache:
+  `CGIPassAuth On` (или `SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1`).
+- Ошибки — **коды ядра**: `rest_not_logged_in` (кредов нет),
+  `incorrect_password` (неверный пароль приложения),
+  `application_password_failed`. Свой `wss_unauthorized` остаётся только для
+  cookie-only запроса — с текстом, что нужен Application Password.
+- **Cookie-сессии здесь не принимаются** осознанно: API-клиенты не должны
+  зависеть от браузерной сессии, а CSRF-поверхность остаётся нулевой.
+- Минимальная роль — та, у которой есть `publish_posts` (Автор и выше).
 
 **Каждый метод принимает и GET, и POST.** Причина — кэш NGINX перед сайтом:
 он кэширует GET-ответы, поэтому клиент не должен зависеть от глагола. Ответы

@@ -18,9 +18,10 @@ final class WSS_Rest_Controller {
 	}
 
 	public function register_hooks(): void {
-		// Early 401 without HTML/redirect, before the REST stack loads.
-		add_action( 'init', [ $this, 'early_auth_check' ], 1 );
-
+		// No early auth exit on init: core authenticates Basic credentials
+		// (PHP_AUTH_USER first) inside the REST stack, so a check before it
+		// would refuse requests core accepts. The filter below owns the
+		// decision and its codes.
 		add_action( 'rest_api_init', [ $this, 'register_routes' ] );
 
 		add_filter( 'rest_authentication_errors', [ $this, 'authentication_filter' ] );
@@ -124,41 +125,13 @@ final class WSS_Rest_Controller {
 	}
 
 	/* ============================================================
-	 *  Early 401: fires on init, BEFORE REST routing.
-	 *  IMPORTANT: if a WAF (nginx, Cloudflare, ModSecurity) blocks
-	 *  /wp-json/wss/v1/* before PHP, this filter cannot help — the
-	 *  path must be allow-listed in the WAF.
-	 * ============================================================ */
-
-	public function early_auth_check(): void {
-		if ( ! $this->is_wss_route_request() ) {
-			return;
-		}
-		if ( $this->requested_method() === 'OPTIONS' ) {
-			return;
-		}
-		if ( $this->get_authorization_header() !== '' ) {
-			return; // header present — let REST handle it
-		}
-
-		if ( ! headers_sent() ) {
-			status_header( 401 );
-			nocache_headers();
-			// Same headers as every REST answer: the early exit must not
-			// become the one response a proxy is allowed to cache.
-			$this->send_no_store_headers();
-			header( 'Content-Type: application/json; charset=UTF-8' );
-		}
-		echo wp_json_encode( [
-			'code'    => 'wss_unauthorized',
-			'message' => __( 'Authorization header required (Application Password / Basic Auth).', 'wp-smart-search' ),
-			'data'    => [ 'status' => 401 ],
-		] );
-		exit;
-	}
-
-	/* ============================================================
 	 *  Auth filter (Application Password / Basic only)
+	 *
+	 *  Core authenticates Basic credentials from PHP_AUTH_USER/PHP_AUTH_PW
+	 *  first and only then from the Authorization header; a host without
+	 *  CGIPassAuth On delivers them only through PHP_AUTH_USER. So the
+	 *  "credentials present" test must accept every source, otherwise a
+	 *  request core authenticated successfully is refused here.
 	 * ============================================================ */
 
 	public function authentication_filter( $result ) {
@@ -169,41 +142,56 @@ final class WSS_Rest_Controller {
 			return $result;
 		}
 
-		// No Authorization header — wss_unauthorized (even with cookies).
-		if ( $this->get_authorization_header() === '' ) {
+		$has_basic = $this->has_basic_credentials();
+
+		if ( $has_basic ) {
+			// Core decides: its own errors (incorrect_password,
+			// application_password_failed, rest_not_logged_in) pass through
+			// unchanged, so a client can tell "no credentials" from "wrong
+			// credentials".
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+
+			if ( true === $result || is_user_logged_in() ) {
+				return true;
+			}
+
+			return new WP_Error(
+				'rest_not_logged_in',
+				__( 'Вы не вошли в систему.', 'wp-smart-search' ),
+				[ 'status' => 401 ]
+			);
+		}
+
+		// Cookie session only: deliberately refused for this namespace. The
+		// message names the supported method instead of a blanket 401.
+		if ( is_user_logged_in() || true === $result ) {
 			return new WP_Error(
 				'wss_unauthorized',
-				__( 'Требуется Application Password. Cookie-аутентификация для API не поддерживается.', 'wp-smart-search' ),
+				__( 'Для /wss/v1/* нужен Application Password (HTTPS + Authorization: Basic с логином и паролем приложения). Cookie-сессии здесь не принимаются.', 'wp-smart-search' ),
 				[ 'status' => 401 ]
 			);
 		}
 
-		// Core errors (basic auth) → wss_invalid_credentials.
-		if ( is_wp_error( $result ) ) {
-			return new WP_Error(
-				'wss_invalid_credentials',
-				__( 'Неверные учётные данные Application Password.', 'wp-smart-search' ),
-				[ 'status' => 401 ]
-			);
+		// No credentials at all: core's own answer, not a wss_* code.
+		return is_wp_error( $result )
+			? $result
+			: new WP_Error( 'rest_not_logged_in', __( 'Вы не вошли в систему.', 'wp-smart-search' ), [ 'status' => 401 ] );
+	}
+
+	/**
+	 * Whether the request carries Basic credentials at all.
+	 *
+	 * Sources, in core's order: the Authorization header (plain, redirected,
+	 * or from apache_request_headers()) and PHP_AUTH_USER + PHP_AUTH_PW.
+	 */
+	private function has_basic_credentials(): bool {
+		if ( $this->get_authorization_header() !== '' ) {
+			return true;
 		}
 
-		if ( ! is_user_logged_in() ) {
-			return new WP_Error(
-				'wss_invalid_credentials',
-				__( 'Неверные учётные данные Application Password.', 'wp-smart-search' ),
-				[ 'status' => 401 ]
-			);
-		}
-
-		if ( ! current_user_can( WSS_Config::CAPABILITY ) ) {
-			return new WP_Error(
-				'wss_forbidden',
-				__( 'Недостаточно прав. Требуется роль Автор, Редактор или Администратор.', 'wp-smart-search' ),
-				[ 'status' => 403 ]
-			);
-		}
-
-		return true;
+		return ! empty( $_SERVER['PHP_AUTH_USER'] ) && ! empty( $_SERVER['PHP_AUTH_PW'] );
 	}
 
 	/* ============================================================
@@ -231,44 +219,19 @@ final class WSS_Rest_Controller {
 			return $response;
 		}
 
-		if ( $this->get_authorization_header() === '' ) {
-			return new WP_Error(
-				'wss_unauthorized',
-				__( 'Требуется Application Password. Передайте заголовок Authorization: Basic …', 'wp-smart-search' ),
-				[ 'status' => 401 ]
-			);
-		}
-
-		if ( ! is_user_logged_in() ) {
-			return new WP_Error(
-				'wss_invalid_credentials',
-				__( 'Неверные учётные данные Application Password.', 'wp-smart-search' ),
-				[ 'status' => 401 ]
-			);
-		}
-
-		if ( ! current_user_can( WSS_Config::CAPABILITY ) ) {
-			return new WP_Error(
-				'wss_forbidden',
-				__( 'Недостаточно прав. Требуется роль Автор, Редактор или Администратор.', 'wp-smart-search' ),
-				[ 'status' => 403 ]
-			);
-		}
-
 		return $result;
 	}
 
 	public function permission_check( $request ) {
-		// Defense in depth: we do not rely on the filter order of
-		// rest_authentication_errors — /wss/v1/* requires the
-		// Authorization header (Application Password); cookie auth is
-		// not supported here.
-		if ( $this->get_authorization_header() === '' ) {
-			return new WP_Error( 'wss_unauthorized', __( 'Требуется Application Password.', 'wp-smart-search' ), [ 'status' => 401 ] );
-		}
+		// The auth filter already decided how the request was authenticated;
+		// here we only require an authenticated user and the capability.
 		if ( ! is_user_logged_in() ) {
 			WSS_Config::log_security_event( 'cap_denied', 'rest:unauthorized' );
-			return new WP_Error( 'wss_unauthorized', __( 'Требуется Application Password.', 'wp-smart-search' ), [ 'status' => 401 ] );
+			return new WP_Error(
+				'wss_unauthorized',
+				__( 'Требуется Application Password: HTTPS и Authorization: Basic с логином и паролем приложения.', 'wp-smart-search' ),
+				[ 'status' => 401 ]
+			);
 		}
 		if ( ! current_user_can( WSS_Config::CAPABILITY ) ) {
 			WSS_Config::log_security_event( 'cap_denied', 'rest:forbidden' );
@@ -329,24 +292,6 @@ final class WSS_Rest_Controller {
 		// Every route accepts GET and POST (WSS_Config::REST_METHODS);
 		// OPTIONS is the CORS preflight.
 		return implode( ', ', array_merge( WSS_Config::REST_METHODS, [ 'OPTIONS' ] ) );
-	}
-
-	/**
-	 * Headers that keep a reverse proxy away from an answer.
-	 *
-	 * Every route accepts GET because clients need it, but the answer depends
-	 * on the authenticated user (drafts, private posts), so NGINX in front of
-	 * the site must not cache it: no-store plus Vary: Authorization. Sent on
-	 * success and on every error path, including the early 401.
-	 */
-	private function send_no_store_headers(): void {
-		if ( headers_sent() ) {
-			return;
-		}
-
-		header( 'Cache-Control: no-store, no-cache, must-revalidate, private' );
-		header( 'Pragma: no-cache' );
-		header( 'Vary: Authorization' );
 	}
 
 	/* ============================================================

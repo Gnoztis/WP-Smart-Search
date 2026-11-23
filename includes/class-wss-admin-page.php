@@ -1074,11 +1074,15 @@ final class WSS_Admin_Page {
 				echo esc_html(
 					sprintf(
 						/* translators: %s: capability name */
-						__( 'Только заголовок Authorization: Basic с Application Password из профиля пользователя. Cookie-аутентификация на этих маршрутах не поддерживается; минимальное право — %s.', 'wp-smart-search' ),
+						__( 'Логин и Application Password по Basic — как у любого REST-запроса WordPress. Пароль приложения: Пользователи → Профиль → Application Passwords (показывается один раз). Нужен HTTPS: по http WordPress пароли приложений не отдаёт. Минимальное право — %s.', 'wp-smart-search' ),
 						WSS_Config::CAPABILITY
 					)
 				);
 				?>
+			</p>
+
+			<p class="wss-panel-text">
+				<?php esc_html_e( 'Заголовок Authorization: Basic — основной способ. Если хост не передаёт его в PHP (без CGIPassAuth), core читает PHP_AUTH_USER/PHP_AUTH_PW — такие креды тоже принимаются. Ошибки — коды ядра: rest_not_logged_in, incorrect_password, application_password_failed; wss_unauthorized остаётся только для cookie-only запроса. Cookie-сессии здесь не принимаются осознанно: CSRF-поверхность нулевая, клиент не зависит от браузера.', 'wp-smart-search' ); ?>
 			</p>
 
 			<p class="wss-panel-text">
