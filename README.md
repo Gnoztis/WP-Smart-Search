@@ -4,7 +4,7 @@
 админке и REST API (Application Password) для внешних инструментов —
 дедупликации, аудита источников, внутренних ссылок.
 
-Версия 2.8.3. Требуется WordPress 7.0+, PHP 8.0+ (WordPress 7.0 не работает
+Версия 2.8.4. Требуется WordPress 7.0+, PHP 8.0+ (WordPress 7.0 не работает
 на PHP ниже 7.4 — плагин требует 8.0).
 
 ## Установка
@@ -148,7 +148,7 @@ curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \
 `host`, `domain`, `anchor`, `anchor_kind`, `context`, `match_type`);
 `anchor_match` и `anchor_kind` принимаются так же, как в `/search`.
 
-### `GET /wss/v1/tags`
+### `GET|POST /wss/v1/tags`
 
 Метки для пайплайна: проверка существования по слагу, поиск по имени, метки
 записи и пакетная проверка — **один запрос вместо двух** вызовов

@@ -100,6 +100,27 @@ final class WSS_Config {
 	/** Fields a client may ask for in `fields`. */
 	public const TAGS_FIELDS = [ 'id', 'name', 'slug', 'count' ];
 
+	/** Declared parameters of /wss/v1/tags; anything else is a 400. */
+	public const TAGS_PARAMS = [
+		'slug',
+		'search',
+		'prefix',
+		'post_id',
+		'taxonomy',
+		'include_counts',
+		'page',
+		'per_page',
+		'fields',
+	];
+
+	/**
+	 * WordPress-internal parameters every REST route has to tolerate.
+	 *
+	 * _fields/_embed/_locale are applied by core to the response, _envelope
+	 * wraps it, context and nonce are client conventions.
+	 */
+	public const TAGS_INTERNAL_PARAMS = [ '_fields', '_embed', '_locale', '_envelope', 'context', 'nonce' ];
+
 	/** Taxonomies the endpoint exposes; anything else is a 400. */
 	public const TAGS_TAXONOMIES = [ 'post_tag', 'category' ];
 

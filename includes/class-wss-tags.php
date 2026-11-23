@@ -49,6 +49,11 @@ final class WSS_Tags {
 	/**
 	 * Answers one /tags request.
 	 *
+	 * Rule of the endpoint: a parameter that is present but cannot be applied
+	 * is a 400, never "no filter". An unusable slug, search, prefix, taxonomy
+	 * or post_id must not silently widen the query to the whole taxonomy — a
+	 * typo has to look like an error, not like a valid answer.
+	 *
 	 * @param array $input Raw request parameters.
 	 * @return array|WP_Error
 	 */
@@ -58,9 +63,22 @@ final class WSS_Tags {
 			return $slugs;
 		}
 
-		$search   = isset( $input['search'] ) ? trim( (string) $input['search'] ) : '';
-		$prefix   = isset( $input['prefix'] ) ? trim( (string) $input['prefix'] ) : '';
-		$taxonomy = isset( $input['taxonomy'] ) ? sanitize_key( (string) $input['taxonomy'] ) : 'post_tag';
+		$search = $this->text_param( $input['search'] ?? null, 'search', 'wss_invalid_search' );
+		if ( is_wp_error( $search ) ) {
+			return $search;
+		}
+
+		$prefix = $this->text_param( $input['prefix'] ?? null, 'prefix', 'wss_invalid_prefix' );
+		if ( is_wp_error( $prefix ) ) {
+			return $prefix;
+		}
+
+		$taxonomy = $this->text_param( $input['taxonomy'] ?? null, 'taxonomy', 'wss_invalid_taxonomy' );
+		if ( is_wp_error( $taxonomy ) ) {
+			return $taxonomy;
+		}
+
+		$taxonomy = sanitize_key( $taxonomy );
 		$counts   = $this->to_bool( $input['include_counts'] ?? null, true );
 		$page     = max( 1, (int) ( $input['page'] ?? 1 ) );
 		$per_page = (int) ( $input['per_page'] ?? WSS_Config::TAGS_PER_PAGE );
@@ -353,9 +371,17 @@ final class WSS_Tags {
 	 * ============================================================ */
 
 	/**
-	 * Normalised slug list: null when absent, [] never returned.
+	 * Normalised slug list: null when absent, a list of lower-case slugs
+	 * otherwise.
 	 *
-	 * @param mixed $value Single slug or a comma separated list.
+	 * A JSON body may carry an array, a query string carries the comma form;
+	 * both are the same parameter. A present but unusable value is a 400 —
+	 * never "no filter": `slug=[]`, `slug=[null]`, `slug=[1]` or a nested
+	 * array must not answer with the whole taxonomy. The same rule covers
+	 * search, prefix, taxonomy and post_id: a value that cannot be applied is
+	 * an error, not an empty filter.
+	 *
+	 * @param mixed $value Comma separated string, or an array of strings.
 	 * @return string[]|WP_Error|null
 	 */
 	private function parse_slugs( $value ) {
@@ -363,17 +389,39 @@ final class WSS_Tags {
 			return null;
 		}
 
-		$raw = is_array( $value ) ? $value : explode( ',', (string) $value );
+		if ( is_array( $value ) ) {
+			// Strictly strings: null, numbers and nested arrays are a client
+			// bug, and turning them into "" would silently query everything.
+			foreach ( $value as $item ) {
+				if ( ! is_string( $item ) ) {
+					return new WP_Error(
+						'wss_invalid_slug',
+						__( 'slug: массив должен содержать только строки; null, числа и вложенные массивы недопустимы.', 'wp-smart-search' ),
+						[ 'status' => 400 ]
+					);
+				}
+			}
+
+			$raw = $value;
+		} elseif ( is_string( $value ) ) {
+			$raw = explode( ',', $value );
+		} else {
+			return new WP_Error(
+				'wss_invalid_slug',
+				__( 'slug должен быть строкой через запятую или массивом строк.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
 
 		$entries = [];
 		foreach ( $raw as $slug ) {
-			if ( ! is_scalar( $slug ) ) {
+			if ( ! is_string( $slug ) ) {
 				continue;
 			}
 
 			// Trim, lower case, spaces to dashes — the way WordPress stores
 			// a slug, so the comparison stays an index lookup.
-			$slug = strtolower( trim( (string) $slug ) );
+			$slug = strtolower( trim( $slug ) );
 			$slug = (string) preg_replace( '/\s+/u', '-', $slug );
 
 			if ( $slug !== '' ) {
@@ -383,7 +431,7 @@ final class WSS_Tags {
 
 		if ( empty( $entries ) ) {
 			return new WP_Error(
-				'wss_empty_slug',
+				'wss_invalid_slug',
 				__( 'Параметр slug пуст: передайте хотя бы один слаг.', 'wp-smart-search' ),
 				[ 'status' => 400 ]
 			);
@@ -404,6 +452,36 @@ final class WSS_Tags {
 		}
 
 		return array_values( array_unique( $entries ) );
+	}
+
+	/**
+	 * A string parameter: absent or empty means "not applied", anything else
+	 * must be a string. An array or a number here is a client bug, not an
+	 * empty filter.
+	 *
+	 * @param mixed  $value
+	 * @param string $name  Parameter name for the error message.
+	 * @param string $code  Error code.
+	 * @return string|WP_Error
+	 */
+	private function text_param( $value, string $name, string $code ) {
+		if ( null === $value || '' === $value ) {
+			return '';
+		}
+
+		if ( ! is_string( $value ) ) {
+			return new WP_Error(
+				$code,
+				sprintf(
+					/* translators: %s: parameter name */
+					__( 'Параметр %s должен быть строкой.', 'wp-smart-search' ),
+					$name
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
+		return trim( $value );
 	}
 
 	/**

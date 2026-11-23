@@ -716,8 +716,12 @@ final class WSS_Admin_Page {
 			. '    # ... proxy_pass и остальное' . "\n"
 			. '}';
 
-		$tags_json = (string) wp_json_encode(
-			[
+		$tags_array_json = 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \\' . "\n"
+			. '  -H "Content-Type: application/json" \\' . "\n"
+			. '  -d \'{"slug": ["cve-2025-45737", "CVE-2026-1319"]}\' \\' . "\n"
+			. '  "' . $endpoints['tags'] . '"';
+
+		$tags_json = (string) wp_json_encode(			[
 				'query'    => [
 					'slug'    => [ 'cve-2026-131914' ],
 					'search'  => null,
@@ -895,7 +899,11 @@ final class WSS_Admin_Page {
 			<p class="wss-api-line"><code>GET|POST <?php echo esc_html( $endpoints['tags'] ); ?></code></p>
 
 			<p class="wss-panel-text">
-				<?php esc_html_e( 'Заменяет прямые вызовы /wp/v2/tags: проверка слага и поиск по имени — один запрос вместо двух, пакет до 50 слагов — тоже один. Отсутствующая метка — это 200 и пустой items, а не 404. Неавторизованный запрос — 401, лимит — 60 запросов в минуту на пользователя (429 с Retry-After).', 'wp-smart-search' ); ?>
+				<?php esc_html_e( 'Заменяет прямые вызовы /wp/v2/tags: проверка слага и поиск по имени — один запрос вместо двух, пакет до 50 слагов — тоже один. Отсутствующая метка — это 200 и пустой items, а не 404. Неавторизованный запрос — 401, лимит — 30 запросов в минуту на пользователя (429 с Retry-After).', 'wp-smart-search' ); ?>
+			</p>
+
+			<p class="wss-panel-text">
+				<?php esc_html_e( 'Опечатка не превращается в «без фильтра»: необъявленный параметр (например, slugs во множественном числе) — 400 со списком допустимых, а slug принимает и строку через запятую, и JSON-массив строк. Пустой массив, null/число/вложенный массив в нём или больше 50 элементов — 400.', 'wp-smart-search' ); ?>
 			</p>
 
 			<?php
@@ -915,6 +923,9 @@ final class WSS_Admin_Page {
 
 			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример ответа', 'wp-smart-search' ); ?></p>
 			<pre class="wss-api-code"><code><?php echo esc_html( $tags_json ); ?></code></pre>
+
+			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пакет массивом (JSON)', 'wp-smart-search' ); ?></p>
+			<pre class="wss-api-code"><code><?php echo esc_html( $tags_array_json ); ?></code></pre>
 
 			<p class="wss-panel-subtitle"><?php esc_html_e( 'Лимит и прокси', 'wp-smart-search' ); ?></p>
 			<p class="wss-panel-text">
@@ -1300,7 +1311,7 @@ final class WSS_Admin_Page {
 	 */
 	private function tags_param_docs(): array {
 		return [
-			[ 'slug', 'string', __( 'до 50 через запятую', 'wp-smart-search' ), __( 'Точное сравнение по слагу (нижний регистр, пробелы → дефис), по индексу slug, без LIKE. Неизвестный слаг — просто нет в items.', 'wp-smart-search' ) ],
+			[ 'slug', 'string | string[]', __( 'до 50 через запятую или массив', 'wp-smart-search' ), __( 'Строка через запятую или JSON-массив строк. Точное сравнение по слагу (нижний регистр, пробелы → дефис), по индексу slug, без LIKE. Пустой массив, null/число/вложенный массив или больше 50 — 400; неизвестный слаг — просто нет в items.', 'wp-smart-search' ) ],
 			[ 'search', 'string', __( 'минимум 3 символа', 'wp-smart-search' ), __( 'Подстрока имени, регистр не важен. Вместе со slug — 400: для проверки существования достаточно slug.', 'wp-smart-search' ) ],
 			[ 'prefix', 'string', __( 'минимум 2 символа', 'wp-smart-search' ), __( 'Имя начинается с подстроки — подсказки для выбора существующей метки.', 'wp-smart-search' ) ],
 			[ 'post_id', 'integer', '—', __( 'Метки указанной записи. Приватная запись без прав на чтение — пустой items.', 'wp-smart-search' ) ],
@@ -1445,6 +1456,13 @@ final class WSS_Admin_Page {
 			[ 'wss_rate_limited', '429', __( 'Превышен лимит запросов; смотрите Retry-After.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_statuses', '400', __( 'Статус не входит в allowed_statuses.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_fields', '400', __( 'Неизвестное поле в fields или не строка в списке.', 'wp-smart-search' ) ],
+			[ 'wss_unknown_param', '400', __( 'Параметр не объявлен у /tags: опечатка (например, slugs) не игнорируется, в ответе — список допустимых.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_slug', '400', __( 'slug: пустой массив, не строка в массиве, вложенный массив или не строка/список.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_search', '400', __( 'search передан не строкой.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_prefix', '400', __( 'prefix передан не строкой.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_post_id', '400', __( 'post_id не положительное целое (abc, 1.5, -1, 0, массив).', 'wp-smart-search' ) ],
+			[ 'wss_invalid_taxonomy', '400', __( 'Таксономия не из post_tag, category, any.', 'wp-smart-search' ) ],
+			[ 'wss_too_many_slugs', '400', __( 'Больше 50 слагов за один запрос.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_post_type', '400', __( 'post_type не зарегистрирован.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_anchor_match', '400', __( 'anchor_match не из words, exact, substring.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_anchor_kind', '400', __( 'anchor_kind не из phrase, url, empty, unknown.', 'wp-smart-search' ) ],

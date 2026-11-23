@@ -614,37 +614,37 @@ final class WSS_Rest_Controller {
 	}
 
 	/**
-	 * Arguments of GET /tags.
+	 * Arguments of GET|POST /tags.
 	 *
-	 * The cross-parameter rules (slug+search, minimum lengths, the 50-slug
-	 * cap) are validated in WSS_Tags so the errors keep the wss_* codes.
+	 * Deliberately no `type`/`sanitize_callback` on slug and post_id: REST
+	 * sanitises before it validates, so `sanitize_text_field( array )` would
+	 * turn a JSON array into "" and `absint( 'abc' )` into 0 — both would
+	 * silently become "no filter" and answer with the whole taxonomy. The
+	 * values are validated in WSS_Tags instead, where a bad value is a 400
+	 * with a wss_* code.
 	 */
 	private function tags_args(): array {
 		return [
 			'slug'           => [
-				'description'       => __( 'Слаг или до 50 слагов через запятую.', 'wp-smart-search' ),
-				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'description' => __( 'Слаг или список слагов через запятую (до 50), либо JSON-массив строк.', 'wp-smart-search' ),
 			],
 			'search'         => [
 				'description'       => __( 'Подстрока имени, минимум 3 символа, регистр не важен.', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'prefix'         => [
 				'description'       => __( 'Имя начинается с подстроки, минимум 2 символа.', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'post_id'        => [
-				'description'       => __( 'Вернуть метки указанной записи.', 'wp-smart-search' ),
-				'type'              => 'integer',
-				'sanitize_callback' => 'absint',
+				'description' => __( 'Вернуть метки указанной записи; только положительное целое.', 'wp-smart-search' ),
 			],
 			'taxonomy'       => [
 				'description'       => __( 'post_tag (по умолчанию), category или any.', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'include_counts' => [
 				'description'       => __( 'Вернуть count (число постов), по умолчанию true.', 'wp-smart-search' ),
@@ -1080,6 +1080,23 @@ final class WSS_Rest_Controller {
 			);
 		}
 
+		// An unknown parameter is a 400, not something to ignore: a client
+		// sending `slugs=` (plural) must be told it is wrong, otherwise the
+		// request silently becomes "no filter" and answers with every term.
+		$unknown = $this->unknown_params( $request );
+		if ( ! empty( $unknown ) ) {
+			return new WP_Error(
+				'wss_unknown_param',
+				sprintf(
+					/* translators: 1: unknown parameters, 2: allowed parameters */
+					__( 'Неизвестные параметры: %1$s. Допустимые: %2$s (плюс служебные WordPress: _fields, _embed, _locale, _envelope, context, nonce).', 'wp-smart-search' ),
+					implode( ', ', $unknown ),
+					implode( ', ', WSS_Config::TAGS_PARAMS )
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
 		$result = $this->tags->query( [
 			'slug'           => $this->param( $request, 'slug' ),
 			'search'         => $this->param( $request, 'search' ),
@@ -1097,6 +1114,29 @@ final class WSS_Rest_Controller {
 		}
 
 		return new WP_REST_Response( $result, 200 );
+	}
+
+	/**
+	 * Parameters of a /tags request that the endpoint does not declare.
+	 *
+	 * WordPress-internal parameters (_fields, _embed, _locale, _envelope,
+	 * context, nonce) are tolerated; everything else is a client bug.
+	 *
+	 * @return string[]
+	 */
+	private function unknown_params( WP_REST_Request $request ): array {
+		$known = array_merge( WSS_Config::TAGS_PARAMS, WSS_Config::TAGS_INTERNAL_PARAMS );
+		$given = [];
+
+		foreach ( [ $request->get_query_params(), $request->get_body_params(), $request->get_json_params() ] as $params ) {
+			if ( is_array( $params ) ) {
+				$given = array_merge( $given, array_keys( $params ) );
+			}
+		}
+
+		$given = array_values( array_unique( array_map( 'strval', $given ) ) );
+
+		return array_values( array_diff( $given, $known ) );
 	}
 
 	public function handle_me( WP_REST_Request $request ) {
