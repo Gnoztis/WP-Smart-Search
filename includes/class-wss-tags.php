@@ -60,7 +60,6 @@ final class WSS_Tags {
 
 		$search   = isset( $input['search'] ) ? trim( (string) $input['search'] ) : '';
 		$prefix   = isset( $input['prefix'] ) ? trim( (string) $input['prefix'] ) : '';
-		$post_id  = isset( $input['post_id'] ) ? absint( $input['post_id'] ) : 0;
 		$taxonomy = isset( $input['taxonomy'] ) ? sanitize_key( (string) $input['taxonomy'] ) : 'post_tag';
 		$counts   = $this->to_bool( $input['include_counts'] ?? null, true );
 		$page     = max( 1, (int) ( $input['page'] ?? 1 ) );
@@ -70,6 +69,26 @@ final class WSS_Tags {
 
 		if ( is_wp_error( $fields ) ) {
 			return $fields;
+		}
+
+		// post_id is either absent or a positive integer. "abc", 1.5, -1, 0,
+		// true or an array is a client bug and must be a 400 — silently turning
+		// it into "no filter" answered with the whole taxonomy (40 759 terms).
+		$post_id_raw = $input['post_id'] ?? null;
+		$post_id     = 0;
+
+		if ( null !== $post_id_raw && '' !== $post_id_raw ) {
+			if ( is_bool( $post_id_raw ) || ! is_scalar( $post_id_raw )
+				|| ! preg_match( '/^[0-9]+$/', trim( (string) $post_id_raw ) )
+				|| (int) $post_id_raw <= 0 ) {
+				return new WP_Error(
+					'wss_invalid_post_id',
+					__( 'post_id должен быть положительным целым числом.', 'wp-smart-search' ),
+					[ 'status' => 400 ]
+				);
+			}
+
+			$post_id = (int) $post_id_raw;
 		}
 
 		if ( null !== $slugs && $search !== '' ) {
@@ -346,7 +365,7 @@ final class WSS_Tags {
 
 		$raw = is_array( $value ) ? $value : explode( ',', (string) $value );
 
-		$slugs = [];
+		$entries = [];
 		foreach ( $raw as $slug ) {
 			if ( ! is_scalar( $slug ) ) {
 				continue;
@@ -358,13 +377,11 @@ final class WSS_Tags {
 			$slug = (string) preg_replace( '/\s+/u', '-', $slug );
 
 			if ( $slug !== '' ) {
-				$slugs[] = $slug;
+				$entries[] = $slug;
 			}
 		}
 
-		$slugs = array_values( array_unique( $slugs ) );
-
-		if ( empty( $slugs ) ) {
+		if ( empty( $entries ) ) {
 			return new WP_Error(
 				'wss_empty_slug',
 				__( 'Параметр slug пуст: передайте хотя бы один слаг.', 'wp-smart-search' ),
@@ -372,7 +389,9 @@ final class WSS_Tags {
 			);
 		}
 
-		if ( count( $slugs ) > WSS_Config::TAGS_MAX_SLUGS ) {
+		// Count what the client sent, not what survived deduplication: a
+		// request with 51 entries must be a 400 even if two of them repeat.
+		if ( count( $entries ) > WSS_Config::TAGS_MAX_SLUGS ) {
 			return new WP_Error(
 				'wss_too_many_slugs',
 				sprintf(
@@ -384,7 +403,7 @@ final class WSS_Tags {
 			);
 		}
 
-		return $slugs;
+		return array_values( array_unique( $entries ) );
 	}
 
 	/**

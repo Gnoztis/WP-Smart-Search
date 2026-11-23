@@ -11,6 +11,7 @@ final class WSS_Plugin {
 	private WSS_Rate_Limiter    $rate_limiter;
 	private WSS_Links_Indexer   $links_indexer;
 	private WSS_Index_Backfill  $backfill;
+	private WSS_Index_Queue     $queue;
 	private WSS_Search_Engine   $engine;
 	private WSS_Tags            $tags;
 	private WSS_Ajax_Handler    $ajax;
@@ -30,6 +31,7 @@ final class WSS_Plugin {
 		$this->rate_limiter  = new WSS_Rate_Limiter( $this->cache );
 		$this->links_indexer = new WSS_Links_Indexer();
 		$this->backfill      = new WSS_Index_Backfill( $this->links_indexer );
+		$this->queue         = new WSS_Index_Queue( $this->links_indexer );
 		$this->engine        = new WSS_Search_Engine( $this->cache );
 		$this->tags          = new WSS_Tags( $this->cache );
 		$this->ajax          = new WSS_Ajax_Handler( $this->engine, $this->rate_limiter, $this->backfill );
@@ -42,6 +44,7 @@ final class WSS_Plugin {
 		$this->cache->register_hooks();
 		$this->links_indexer->register_hooks();
 		$this->backfill->register_hooks();
+		$this->queue->register_hooks();
 		$this->tags->register_hooks();
 		$this->ajax->register_hooks();
 		$this->rest->register_hooks();

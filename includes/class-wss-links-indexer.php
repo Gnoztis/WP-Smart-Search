@@ -15,10 +15,6 @@ final class WSS_Links_Indexer {
 		'context', 'created_at',
 	];
 
-	/** @var array<int,bool> */
-	private array $indexed = [];
-	private array $deleted = [];
-
 	public function register_hooks(): void {
 		add_action( 'init',                   [ $this, 'maybe_install' ] );
 		add_action( 'save_post',              [ $this, 'on_save_post' ], 10, 3 );
@@ -322,41 +318,57 @@ final class WSS_Links_Indexer {
 		if ( wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) {
 			return;
 		}
+
 		$post_id = (int) $post_id;
-		if ( $post_id <= 0 || isset( $this->indexed[ $post_id ] ) ) {
+		if ( $post_id <= 0 ) {
 			return;
 		}
+
 		$post = $post instanceof WP_Post ? $post : get_post( $post_id );
 		if ( ! $post instanceof WP_Post || $post->post_type !== 'post' ) {
 			return;
 		}
-		$this->indexed[ $post_id ] = true;
-		$this->reindex( $post );
+
+		// Never parse links inside the save request: the editor must not pay
+		// for it, and a bulk edit must not reindex dozens of posts at once.
+		// The worker drains the queue in small batches.
+		if ( 'publish' === $post->post_status ) {
+			WSS_Index_Queue::enqueue_index( $post_id );
+		} else {
+			WSS_Index_Queue::enqueue_remove( $post_id );
+		}
 	}
 
 	public function on_transition( $new_status, $old_status, $post ): void {
 		if ( ! $post instanceof WP_Post || $post->post_type !== 'post' ) {
 			return;
 		}
+
 		$post_id = (int) $post->ID;
-		if ( isset( $this->indexed[ $post_id ] ) || isset( $this->deleted[ $post_id ] ) ) {
+
+		// Direct publish (draft -> publish), a cron publish (future ->
+		// publish) and any update of a published post are indexed.
+		if ( 'publish' === $new_status ) {
+			WSS_Index_Queue::enqueue_index( $post_id );
+
 			return;
 		}
-		if ( in_array( $new_status, [ 'auto-draft', 'inherit', 'trash' ], true ) ) {
-			// Deletion/trash is handled by a separate hook (deleted_post).
-			return;
+
+		// Unpublish, trash and schedule: the post is no longer public, so its
+		// rows must go. deleted_post covers permanent deletion.
+		if ( 'publish' === $old_status ) {
+			WSS_Index_Queue::enqueue_remove( $post_id );
 		}
-		$this->indexed[ $post_id ] = true;
-		$this->reindex( $post );
 	}
 
 	public function on_delete( $post_id ): void {
 		$post_id = (int) $post_id;
-		if ( $post_id <= 0 || isset( $this->deleted[ $post_id ] ) ) {
+
+		if ( $post_id <= 0 ) {
 			return;
 		}
-		$this->deleted[ $post_id ] = true;
-		$this->delete_post( $post_id );
+
+		WSS_Index_Queue::enqueue_remove( $post_id );
 	}
 
 	/* ============================================================

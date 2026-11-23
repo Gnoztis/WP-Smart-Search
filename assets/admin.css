@@ -6,6 +6,15 @@
 	margin-top: 12px;
 }
 
+/* WCAG 2.4.11: the fixed admin bar must not cover a focused control. */
+html {
+	scroll-padding-top: 46px;
+}
+
+.wss-wrap :is( a, button, input, select, textarea, summary ):focus {
+	scroll-margin-top: 46px;
+}
+
 /* ============================================================
    Прогресс-бар
    ============================================================ */
@@ -91,7 +100,7 @@
 	box-shadow: 0 0 0 3px rgba(34,113,177,.12);
 }
 .wss-input::placeholder {
-	color: #a7aaad;
+	color: #767676;
 }
 
 .wss-clear {
@@ -201,7 +210,7 @@
 	font-size: 11px;
 	text-transform: uppercase;
 	letter-spacing: .5px;
-	color: #8c8f94;
+	color: #646970;
 	margin: 0 0 10px;
 	font-weight: 600;
 }
@@ -210,6 +219,7 @@
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	min-height: 24px;
 	margin-bottom: 8px;
 	font-size: 13px;
 	color: #50575e;
@@ -244,6 +254,7 @@
 
 .wss-reset-btn {
 	width: 100%;
+	min-height: 24px;
 	margin-top: 16px;
 	padding: 8px;
 	background: #f6f7f7;
@@ -269,10 +280,13 @@
 
 .wss-api-section summary {
 	cursor: pointer;
+	display: flex;
+	align-items: center;
+	min-height: 24px;
 	font-size: 11px;
 	text-transform: uppercase;
 	letter-spacing: .5px;
-	color: #8c8f94;
+	color: #646970;
 	font-weight: 600;
 	list-style: none;
 	user-select: none;
@@ -329,6 +343,7 @@
 .wss-tab {
 	display: inline-flex;
 	align-items: center;
+	min-height: 24px;
 	padding: 6px 14px;
 	border-radius: 7px;
 	font-size: 13px;
@@ -383,7 +398,7 @@
 	text-transform: uppercase;
 	letter-spacing: .5px;
 	font-weight: 600;
-	color: #8c8f94;
+	color: #646970;
 	margin: 20px 0 8px;
 }
 
@@ -428,8 +443,9 @@
 }
 .wss-index-recreate-label {
 	display: inline-flex;
-	align-items: baseline;
+	align-items: center;
 	gap: 6px;
+	min-height: 24px;
 	margin: 0;
 	font-size: 12px;
 	color: #50575e;
@@ -507,6 +523,9 @@
 
 .wss-doc > summary {
 	cursor: pointer;
+	display: flex;
+	align-items: center;
+	min-height: 24px;
 	font-size: 13px;
 	font-weight: 600;
 	color: #1d2327;
@@ -556,7 +575,7 @@
 	font-size: 10px;
 	text-transform: uppercase;
 	letter-spacing: .5px;
-	color: #8c8f94;
+	color: #646970;
 	background: #f6f7f7;
 	border-bottom-color: #dcdcde;
 	white-space: nowrap;
@@ -642,7 +661,7 @@
 	gap: 12px;
 	padding: 48px 24px;
 	text-align: center;
-	color: #8c8f94;
+	color: #646970;
 	background: #fff;
 	border: 1px dashed #dcdcde;
 	border-radius: 16px;
@@ -660,7 +679,7 @@
 	margin: 0;
 	font-size: 14px;
 	line-height: 1.5;
-	color: #8c8f94;
+	color: #646970;
 }
 
 /* ============================================================
@@ -751,7 +770,7 @@
 	font-size: 12px;
 	text-transform: uppercase;
 	letter-spacing: .6px;
-	color: #8c8f94;
+	color: #646970;
 	margin: 0 0 16px;
 	padding-bottom: 14px;
 	border-bottom: 1px solid #f0f0f1;
@@ -844,7 +863,7 @@
 	align-items: center;
 	padding: 8px 20px 12px;
 	font-size: 12px;
-	color: #8c8f94;
+	color: #646970;
 }
 .wss-post-info:last-child {
 	padding-bottom: 16px;
@@ -914,7 +933,7 @@ a.wss-post-author-name:hover {
 	font-weight: 600;
 	text-transform: uppercase;
 	letter-spacing: .3px;
-	color: #a7aaad;
+	color: #646970;
 	padding-right: 4px;
 	user-select: none;
 }
@@ -1044,7 +1063,7 @@ a.wss-post-author-name:hover {
 }
 
 .wss-page-gap {
-	color: #a7aaad;
+	color: #646970;
 	padding: 0 4px;
 	user-select: none;
 }
@@ -1052,7 +1071,7 @@ a.wss-post-author-name:hover {
 .wss-empty {
 	padding: 40px 20px;
 	text-align: center;
-	color: #8c8f94;
+	color: #646970;
 	background: #fff;
 	border: 1px dashed #dcdcde;
 	border-radius: 14px;
@@ -1075,7 +1094,7 @@ body.wss-dark-page .wrap.wss-wrap {
 }
 body.wss-dark-page #wpfooter {
 	background: #1a1d21;
-	color: #6b7280;
+	color: #9ca3af;
 }
 body.wss-dark-page #wpfooter a {
 	color: #9ca3af;
@@ -1393,7 +1412,7 @@ body.wss-dark-page .wss-badge-private { background: #2d1f4a; color: #a78bfa; }
 body.wss-dark-page .wss-badge-future  { background: #1a2942; color: #60a5fa; }
 
 body.wss-dark-page .wss-tax-label {
-	color: #6b7280;
+	color: #9ca3af;
 }
 body.wss-dark-page .wss-post-tag {
 	background: #353a41;
@@ -1457,7 +1476,7 @@ body.wss-dark-page .wss-page.wss-page-active:hover {
 	background: #4a9eff;
 }
 body.wss-dark-page .wss-page-gap {
-	color: #6b7280;
+	color: #9ca3af;
 }
 
 body.wss-dark-page .wss-empty {

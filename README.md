@@ -4,7 +4,7 @@
 админке и REST API (Application Password) для внешних инструментов —
 дедупликации, аудита источников, внутренних ссылок.
 
-Версия 2.8.0. Требуется WordPress 7.0+, PHP 8.0+ (WordPress 7.0 не работает
+Версия 2.8.3. Требуется WordPress 7.0+, PHP 8.0+ (WordPress 7.0 не работает
 на PHP ниже 7.4 — плагин требует 8.0).
 
 ## Установка
@@ -25,8 +25,12 @@
   (домен, хост, точный URL, текст анкора).
 - Морфология: слова ищутся по основам, между словами — логическое И.
   «обход песочницы» находит «обходу песочницу».
-- Индексация ссылок из контента: таблица `wss_links` обновляется при
-  сохранении записи.
+- Индексация ссылок из контента: таблица `wss_links` обновляется в фоне —
+  сохранение только ставит запись в очередь (`wss_index_queue`), один
+  запланированный проход разбирает её батчами по 20 в пределах 15 секунд;
+  редактор не платит за парсинг ссылок, а массовое редактирование не
+  переиндексирует десятки записей подряд. Очередь видна в `/me` (`index.queue`:
+  `length`, `last_run`, `errors`, первые 20 id, `dropped`).
 - Доиндексация из браузера: на вкладке «Индексирование» шаг за шагом, с
   прогресс-баром и кнопкой «Остановить»; лок общий с фоновой задачей, прогресс
   сохраняется на сервере.
@@ -49,9 +53,29 @@
 Cookie-аутентификация для этих маршрутов не поддерживается. Минимальная
 роль — та, у которой есть `publish_posts` (Автор и выше).
 
+**Каждый метод принимает и GET, и POST.** Причина — кэш NGINX перед сайтом:
+он кэширует GET-ответы, поэтому клиент не должен зависеть от глагола. Ответы
+всегда уходят с `Cache-Control: no-store, no-cache, must-revalidate, private` и
+`Vary: Authorization` — в том числе ошибки и ранний 401. Записи через GET
+разрешены осознанно: cookie-аутентификации здесь нет, CSRF невозможен, а сама
+операция идемпотентна — повторная пересборка не запускает второй прогон
+(`accepted: true`, `already_running`). Параметры можно передавать и в query, и в
+JSON-теле: тело важнее query.
+
 ```bash
+# GET — то, что кэширует NGINX (ответ всё равно no-store)
 curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \
-  "https://example.com/wp-json/wss/v1/me"
+  "https://example.com/wp-json/wss/v1/tags?slug=cve-2026-131914"
+
+# POST — параметры в JSON-теле
+curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"slug":"cve-2026-131914"}' \
+  "https://example.com/wp-json/wss/v1/tags"
+
+# Запись через GET: повтор безопасен
+curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \
+  "https://example.com/wp-json/wss/v1/index/rebuild"
 ```
 
 ### `GET|POST /wss/v1/search`
@@ -172,6 +196,27 @@ curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \
 `/wss/v1/tags` закрывает все сценарии одним запросом, с правами WSS, лимитом и
 кэшем; клиент пайплайна (`pipeline/wss.py`: `tags()` и `term_ids()`) — отдельная
 карточка в репозитории пайплайна.
+
+**Лимит и прокси.** Плагин разрешает 30 запросов в минуту на пользователя
+(константа `WSS_TAGS_RATE_LIMIT`, фильтр `wss_tags_rate_limit`) — меньше, чем
+бакет впереди стоящего NGINX, чтобы `429` пришёл от плагина, а не `503` от
+прокси. Отказ — это JSON-тело `wss_rate_limited` с `Retry-After` и
+`X-RateLimit-Limit`/`Remaining`/`Reset` (тот же `no-store`). NGINX по умолчанию
+отвечает на превышение `limit_req` кодом **503 с HTML** — клиент такой ответ не
+разберёт, поэтому в конфиге нужен `limit_req_status 429`:
+
+```nginx
+limit_req_zone $binary_remote_addr zone=wss_tags:10m rate=60r/m;
+limit_req_status 429;                     # иначе NGINX отдаёт HTML 503
+
+location ^~ /wp-json/wss/v1/ {
+    limit_req zone=wss_tags burst=20 nodelay;
+    # ... proxy_pass и остальное
+}
+```
+
+Эффективный лимит и его источник (`default`, `constant`, `filter`) видны в
+`GET /wss/v1/me`: `tags_rate_limit`, `tags_rate_limit_source`.
 
 ### `GET|POST /wss/v1/me`
 

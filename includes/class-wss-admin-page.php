@@ -21,10 +21,12 @@ final class WSS_Admin_Page {
 	 */
 	public function handle_index_recreate(): void {
 		if ( ! WSS_Config::user_can_search() ) {
+			WSS_Config::log_security_event( 'object_denied', 'admin_page' );
 			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), 403 );
 		}
 
 		if ( ! WSS_Config::user_can_rebuild() ) {
+			WSS_Config::log_security_event( 'cap_denied', 'admin:index_recreate' );
 			wp_die( esc_html__( 'Пересоздание индекса доступно администратору сайта.', 'wp-smart-search' ), 403 );
 		}
 
@@ -61,10 +63,12 @@ final class WSS_Admin_Page {
 	 */
 	public function handle_index_rebuild(): void {
 		if ( ! WSS_Config::user_can_search() ) {
+			WSS_Config::log_security_event( 'object_denied', 'admin_page' );
 			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), 403 );
 		}
 
 		if ( ! WSS_Config::user_can_rebuild() ) {
+			WSS_Config::log_security_event( 'cap_denied', 'admin:index_rebuild' );
 			wp_die( esc_html__( 'Переиндексация доступна администратору сайта.', 'wp-smart-search' ), 403 );
 		}
 
@@ -283,6 +287,7 @@ final class WSS_Admin_Page {
 
 	public function render(): void {
 		if ( ! WSS_Config::user_can_search() ) {
+			WSS_Config::log_security_event( 'object_denied', 'admin_page' );
 			wp_die( esc_html__( 'У вас нет доступа к этой странице.', 'wp-smart-search' ), 403 );
 		}
 
@@ -701,6 +706,16 @@ final class WSS_Admin_Page {
 		$tags_curl = 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \\' . "\n"
 			. '  "' . $endpoints['tags'] . '?slug=cve-2026-131914&per_page=20"';
 
+		// The REST prefix is taken from rest_url(), never hardcoded: a site can
+		// change it, and the snippet must match the URL clients actually call.
+		$rest_path  = (string) wp_parse_url( rest_url(), PHP_URL_PATH );
+		$nginx_tags = 'limit_req_zone $binary_remote_addr zone=wss_tags:10m rate=60r/m;' . "\n"
+			. 'limit_req_status 429;          # иначе NGINX отдаёт HTML 503' . "\n\n"
+			. 'location ^~ ' . $rest_path . 'wss/v1/ {' . "\n"
+			. '    limit_req zone=wss_tags burst=20 nodelay;' . "\n"
+			. '    # ... proxy_pass и остальное' . "\n"
+			. '}';
+
 		$tags_json = (string) wp_json_encode(
 			[
 				'query'    => [
@@ -726,6 +741,17 @@ final class WSS_Admin_Page {
 			],
 			$json_flags
 		);
+
+		$verbs_curl = '# GET — то, что кэширует NGINX (ответ всё равно no-store)' . "\n"
+			. 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \\' . "\n"
+			. '  "' . $endpoints['tags'] . '?slug=cve-2026-131914"' . "\n\n"
+			. '# POST — параметры в JSON-теле (важнее query)' . "\n"
+			. 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \\' . "\n"
+			. '  -H "Content-Type: application/json" \\' . "\n"
+			. '  -d \'{"slug":"cve-2026-131914"}\' \\' . "\n"
+			. '  "' . $endpoints['tags'] . '"' . "\n\n"
+			. '# Запись через GET: повтор безопасен (accepted: true, already_running)' . "\n"
+			. 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" "' . $endpoints['rebuild'] . '"';
 
 		$rebuild_json = (string) wp_json_encode(
 			[
@@ -864,9 +890,9 @@ final class WSS_Admin_Page {
 		</details>
 
 		<details class="wss-doc">
-			<summary><?php esc_html_e( 'GET /tags — метки: существование, поиск, метки поста', 'wp-smart-search' ); ?></summary>
+			<summary><?php esc_html_e( 'GET|POST /tags — метки: существование, поиск, метки поста', 'wp-smart-search' ); ?></summary>
 
-			<p class="wss-api-line"><code>GET <?php echo esc_html( $endpoints['tags'] ); ?></code></p>
+			<p class="wss-api-line"><code>GET|POST <?php echo esc_html( $endpoints['tags'] ); ?></code></p>
 
 			<p class="wss-panel-text">
 				<?php esc_html_e( 'Заменяет прямые вызовы /wp/v2/tags: проверка слага и поиск по имени — один запрос вместо двух, пакет до 50 слагов — тоже один. Отсутствующая метка — это 200 и пустой items, а не 404. Неавторизованный запрос — 401, лимит — 60 запросов в минуту на пользователя (429 с Retry-After).', 'wp-smart-search' ); ?>
@@ -889,12 +915,26 @@ final class WSS_Admin_Page {
 
 			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример ответа', 'wp-smart-search' ); ?></p>
 			<pre class="wss-api-code"><code><?php echo esc_html( $tags_json ); ?></code></pre>
+
+			<p class="wss-panel-subtitle"><?php esc_html_e( 'Лимит и прокси', 'wp-smart-search' ); ?></p>
+			<p class="wss-panel-text">
+				<?php
+				echo esc_html(
+					sprintf(
+						/* translators: %d: requests per minute */
+						__( 'Плагин разрешает %d запросов в минуту на пользователя (константа WSS_TAGS_RATE_LIMIT, фильтр wss_tags_rate_limit) — меньше, чем бакет прокси, чтобы 429 пришёл от плагина. Отказ — JSON с Retry-After и X-RateLimit-*, всегда с no-store. NGINX по умолчанию отдаёт на limit_req HTML 503, который клиент не разберёт, поэтому нужен limit_req_status 429.', 'wp-smart-search' ),
+						(int) WSS_Config::tags_rate_limit()
+					)
+				);
+				?>
+			</p>
+			<pre class="wss-api-code"><code><?php echo esc_html( $nginx_tags ); ?></code></pre>
 		</details>
 
 		<details class="wss-doc">
-			<summary><?php esc_html_e( 'POST /links/batch — пакетный поиск по ссылкам', 'wp-smart-search' ); ?></summary>
+			<summary><?php esc_html_e( 'GET|POST /links/batch — пакетный поиск по ссылкам', 'wp-smart-search' ); ?></summary>
 
-			<p class="wss-api-line"><code>POST <?php echo esc_html( $endpoints['batch'] ); ?></code></p>
+			<p class="wss-api-line"><code>GET|POST <?php echo esc_html( $endpoints['batch'] ); ?></code></p>
 
 			<p class="wss-panel-text">
 				<?php
@@ -952,12 +992,12 @@ final class WSS_Admin_Page {
 		</details>
 
 		<details class="wss-doc">
-			<summary><?php esc_html_e( 'GET /index и POST /index/rebuild — здоровье индекса', 'wp-smart-search' ); ?></summary>
+			<summary><?php esc_html_e( 'GET|POST /index, /index/rebuild, /index/step, /index/recreate — здоровье индекса', 'wp-smart-search' ); ?></summary>
 
-			<p class="wss-api-line"><code>GET <?php echo esc_html( $endpoints['index'] ); ?></code></p>
-			<p class="wss-api-line"><code>POST <?php echo esc_html( $endpoints['rebuild'] ); ?></code></p>
-			<p class="wss-api-line"><code>POST <?php echo esc_html( $endpoints['step'] ); ?></code></p>
-			<p class="wss-api-line"><code>POST <?php echo esc_html( $endpoints['recreate'] ); ?></code></p>
+			<p class="wss-api-line"><code>GET|POST <?php echo esc_html( $endpoints['index'] ); ?></code></p>
+			<p class="wss-api-line"><code>GET|POST <?php echo esc_html( $endpoints['rebuild'] ); ?></code></p>
+			<p class="wss-api-line"><code>GET|POST <?php echo esc_html( $endpoints['step'] ); ?></code></p>
+			<p class="wss-api-line"><code>GET|POST <?php echo esc_html( $endpoints['recreate'] ); ?></code></p>
 
 			<p class="wss-panel-text">
 				<?php esc_html_e( 'Оба метода доступны только администратору (manage_options). Пока state не ready, поиск по ссылкам отвечает «ничего не найдено» на любой запрос — это не значит, что ссылок нет: сначала переиндексируйте. POST /index/step выполняет ровно один пакет фоновой пересборки синхронно и возвращает прогресс — так проверяют фоновой путь, не дожидаясь WP-Cron; 409 означает, что пакет не запускался (занято другим воркером или пересборку ведёт браузер). POST /index/recreate удаляет таблицу индекса и создаёт её заново по текущей схеме: требуется тело {"confirm":"recreate"}, иначе 400; после этого state=empty, пересборка не запускается автоматически.', 'wp-smart-search' ); ?>
@@ -992,6 +1032,13 @@ final class WSS_Admin_Page {
 				);
 				?>
 			</p>
+
+			<p class="wss-panel-text">
+				<?php esc_html_e( 'Каждый метод принимает и GET, и POST. Причина — кэш NGINX перед сайтом: он кэширует GET-ответы, поэтому клиент не должен зависеть от глагола. Ответы уходят с Cache-Control: no-store и Vary: Authorization, а записи (пересборка, пересоздание, шаг) идемпотентны: повторный GET не запускает второй прогон и возвращает accepted: true с уже начатой задачей. Параметры можно передавать и в query, и в JSON-теле — тело важнее query.', 'wp-smart-search' ); ?>
+			</p>
+
+			<p class="wss-panel-subtitle"><?php esc_html_e( 'Один и тот же запрос двумя способами', 'wp-smart-search' ); ?></p>
+			<pre class="wss-api-code"><code><?php echo esc_html( $verbs_curl ); ?></code></pre>
 
 			<p class="wss-panel-text">
 				<?php

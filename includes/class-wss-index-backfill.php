@@ -1147,6 +1147,10 @@ final class WSS_Index_Backfill {
 			'percent'             => $percent,
 			'posts_total'         => $posts_total,
 			'posts_processed'     => $posts_processed,
+			// Posts created after the pass reached its last cursor: they are
+			// newer than the counter, not lost — the incremental queue or the
+			// next refresh covers them. "26041 из 26046" is this number.
+			'posts_unwalked'      => $done ? max( 0, $posts_total - $posts_processed ) : 0,
 			'posts_with_links'    => $posts_with_links,
 			'posts_without_links' => $posts_without_links,
 			'links_total'         => $links_total,
@@ -1170,6 +1174,8 @@ final class WSS_Index_Backfill {
 				'last'     => (int) ( $state['last_cron'] ?? 0 ),
 				'disabled' => self::cron_disabled(),
 			],
+			// Incremental pass: posts saved since the last rebuild wait here.
+			'queue'               => class_exists( 'WSS_Index_Queue' ) ? WSS_Index_Queue::status() : [],
 			'browser_marker'      => self::browser_active(),
 		];
 	}

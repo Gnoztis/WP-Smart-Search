@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Smart Search
  * Description: AJAX-поиск + REST API (Application Password) с индексацией ссылок для дедупликации.
- * Version:     2.8.0
+ * Version:     2.8.3
  * Author:      Gnostis
  * License:     GPL-2.0-or-later
  * Text Domain: wp-smart-search
@@ -16,7 +16,18 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WSS_VERSION', '2.8.0' );
+define( 'WSS_VERSION', '2.8.3' );
+
+/**
+ * Requests per minute per user for GET|POST /wss/v1/tags.
+ *
+ * Lower than the NGINX bucket in front of the site on purpose: the plugin must
+ * answer a JSON 429 before the proxy answers an HTML 503. A site can lower it
+ * further with the wss_tags_rate_limit filter.
+ */
+if ( ! defined( 'WSS_TAGS_RATE_LIMIT' ) ) {
+	define( 'WSS_TAGS_RATE_LIMIT', 30 );
+}
 define( 'WSS_PLUGIN_FILE', __FILE__ );
 define( 'WSS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
@@ -26,6 +37,7 @@ require_once WSS_PLUGIN_DIR . 'includes/class-wss-cache.php';
 require_once WSS_PLUGIN_DIR . 'includes/class-wss-rate-limiter.php';
 require_once WSS_PLUGIN_DIR . 'includes/class-wss-refang.php';
 require_once WSS_PLUGIN_DIR . 'includes/class-wss-links-indexer.php';
+require_once WSS_PLUGIN_DIR . 'includes/class-wss-index-queue.php';
 require_once WSS_PLUGIN_DIR . 'includes/class-wss-index-backfill.php';
 require_once WSS_PLUGIN_DIR . 'includes/class-wss-search-engine.php';
 require_once WSS_PLUGIN_DIR . 'includes/class-wss-tags.php';

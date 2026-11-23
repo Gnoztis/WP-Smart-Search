@@ -45,10 +45,14 @@ final class WSS_Ajax_Handler {
 			wp_send_json_error( [ 'message' => __( 'Метод не поддерживается.', 'wp-smart-search' ) ], 405 );
 		}
 
-		check_ajax_referer( WSS_Config::NONCE_INDEX_STEP, WSS_Config::NONCE_FIELD );
+		if ( ! check_ajax_referer( WSS_Config::NONCE_INDEX_STEP, WSS_Config::NONCE_FIELD, false ) ) {
+			WSS_Config::log_security_event( 'nonce_failed', 'ajax:index_step' );
+			wp_die( -1, 403 );
+		}
 
 		if ( ! WSS_Config::user_can_rebuild() ) {
-			wp_send_json_error( [ 'message' => __( 'Недостаточно прав для переиндексации.', 'wp-smart-search' ) ], 403 );
+			WSS_Config::log_security_event( 'cap_denied', 'ajax:reindex' );
+			wp_send_json_error( [ 'code' => 'wss_cap_denied', 'message' => __( 'Недостаточно прав для переиндексации.', 'wp-smart-search' ) ], 403 );
 		}
 
 		$start   = isset( $_POST['start'] ) ? absint( wp_unslash( $_POST['start'] ) ) : 0;
@@ -123,10 +127,14 @@ final class WSS_Ajax_Handler {
 			wp_send_json_error( [ 'message' => __( 'Некорректный контекст запроса.', 'wp-smart-search' ) ], 400 );
 		}
 
-		check_ajax_referer( WSS_Config::NONCE_INDEX_STOP, WSS_Config::NONCE_FIELD );
+		if ( ! check_ajax_referer( WSS_Config::NONCE_INDEX_STOP, WSS_Config::NONCE_FIELD, false ) ) {
+			WSS_Config::log_security_event( 'nonce_failed', 'ajax:index_stop' );
+			wp_die( -1, 403 );
+		}
 
 		if ( ! WSS_Config::user_can_rebuild() ) {
-			wp_send_json_error( [ 'message' => __( 'Недостаточно прав для переиндексации.', 'wp-smart-search' ) ], 403 );
+			WSS_Config::log_security_event( 'cap_denied', 'ajax:reindex' );
+			wp_send_json_error( [ 'code' => 'wss_cap_denied', 'message' => __( 'Недостаточно прав для переиндексации.', 'wp-smart-search' ) ], 403 );
 		}
 
 		WSS_Index_Backfill::browser_release();
@@ -153,7 +161,10 @@ final class WSS_Ajax_Handler {
 			wp_send_json_error( [ 'message' => __( 'Метод не поддерживается.', 'wp-smart-search' ) ], 405 );
 		}
 
-		check_ajax_referer( WSS_Config::NONCE_ACTION, WSS_Config::NONCE_FIELD );
+		if ( ! check_ajax_referer( WSS_Config::NONCE_ACTION, WSS_Config::NONCE_FIELD, false ) ) {
+			WSS_Config::log_security_event( 'nonce_failed', 'ajax:search' );
+			wp_die( -1, 403 );
+		}
 
 		if ( ! WSS_Config::user_can_search() ) {
 			wp_send_json_error( [ 'message' => __( 'Доступ запрещён.', 'wp-smart-search' ) ], 403 );

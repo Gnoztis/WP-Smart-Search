@@ -35,14 +35,14 @@ final class WSS_Rest_Controller {
 
 	public function register_routes(): void {
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/search', [
-			'methods'             => [ 'GET', 'POST' ],
+			'methods'             => WSS_Config::REST_METHODS,
 			'callback'            => [ $this, 'handle_search' ],
 			'permission_callback' => [ $this, 'permission_check' ],
 			'args'                => $this->search_args(),
 		] );
 
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/links/batch', [
-			'methods'             => [ 'POST' ],
+			'methods'             => WSS_Config::REST_METHODS,
 			'callback'            => [ $this, 'handle_links_batch' ],
 			'permission_callback' => [ $this, 'permission_check' ],
 			'args'                => $this->batch_args(),
@@ -52,7 +52,7 @@ final class WSS_Rest_Controller {
 		// may be cached by a reverse proxy in front of the site) must not get
 		// a 404 from WordPress, which is what a method mismatch returns.
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/me', [
-			'methods'             => [ 'GET', 'POST' ],
+			'methods'             => WSS_Config::REST_METHODS,
 			'callback'            => [ $this, 'handle_me' ],
 			'permission_callback' => [ $this, 'permission_check' ],
 		] );
@@ -60,13 +60,13 @@ final class WSS_Rest_Controller {
 		// Index health: a link audit is meaningless while the index is
 		// empty or stale, so consumers need to ask before trusting results.
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/index', [
-			'methods'             => [ 'GET' ],
+			'methods'             => WSS_Config::REST_METHODS,
 			'callback'            => [ $this, 'handle_index_status' ],
 			'permission_callback' => [ $this, 'permission_check_admin' ],
 		] );
 
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/index/rebuild', [
-			'methods'             => [ 'POST' ],
+			'methods'             => WSS_Config::REST_METHODS,
 			'callback'            => [ $this, 'handle_index_rebuild' ],
 			'permission_callback' => [ $this, 'permission_check_admin' ],
 		] );
@@ -74,7 +74,7 @@ final class WSS_Rest_Controller {
 		// One batch of the background worker, synchronously: lets an operator
 		// verify the cron path without waiting for WP-Cron to fire.
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/index/step', [
-			'methods'             => [ 'POST' ],
+			'methods'             => WSS_Config::REST_METHODS,
 			'callback'            => [ $this, 'handle_index_step' ],
 			'permission_callback' => [ $this, 'permission_check_admin' ],
 		] );
@@ -82,7 +82,7 @@ final class WSS_Rest_Controller {
 		// Destructive: drops the whole index and creates it again. Requires an
 		// explicit confirmation in the body so a stray POST cannot wipe it.
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/index/recreate', [
-			'methods'             => [ 'POST' ],
+			'methods'             => WSS_Config::REST_METHODS,
 			'callback'            => [ $this, 'handle_index_recreate' ],
 			'permission_callback' => [ $this, 'permission_check_admin' ],
 		] );
@@ -90,7 +90,7 @@ final class WSS_Rest_Controller {
 		// Terms: the pipeline used to call /wp/v2/tags twice per material
 		// (slug, then search). One request answers both.
 		register_rest_route( WSS_Config::REST_NAMESPACE, '/tags', [
-			'methods'             => [ 'GET' ],
+			'methods'             => WSS_Config::REST_METHODS,
 			'callback'            => [ $this, 'handle_tags' ],
 			'permission_callback' => [ $this, 'permission_check' ],
 			'args'                => $this->tags_args(),
@@ -144,6 +144,9 @@ final class WSS_Rest_Controller {
 		if ( ! headers_sent() ) {
 			status_header( 401 );
 			nocache_headers();
+			// Same headers as every REST answer: the early exit must not
+			// become the one response a proxy is allowed to cache.
+			$this->send_no_store_headers();
 			header( 'Content-Type: application/json; charset=UTF-8' );
 		}
 		echo wp_json_encode( [
@@ -264,9 +267,11 @@ final class WSS_Rest_Controller {
 			return new WP_Error( 'wss_unauthorized', __( 'Требуется Application Password.', 'wp-smart-search' ), [ 'status' => 401 ] );
 		}
 		if ( ! is_user_logged_in() ) {
+			WSS_Config::log_security_event( 'cap_denied', 'rest:unauthorized' );
 			return new WP_Error( 'wss_unauthorized', __( 'Требуется Application Password.', 'wp-smart-search' ), [ 'status' => 401 ] );
 		}
 		if ( ! current_user_can( WSS_Config::CAPABILITY ) ) {
+			WSS_Config::log_security_event( 'cap_denied', 'rest:forbidden' );
 			return new WP_Error( 'wss_forbidden', __( 'Недостаточно прав.', 'wp-smart-search' ), [ 'status' => 403 ] );
 		}
 		return true;
@@ -318,16 +323,30 @@ final class WSS_Rest_Controller {
 	}
 
 	/**
-	 * Allow header for an OPTIONS preflight, per route.
+	 * Allow header for an OPTIONS preflight.
 	 */
-	private function allowed_methods( string $route ): string {
-		$route = rtrim( $route, '/' );
+	private function allowed_methods(): string {
+		// Every route accepts GET and POST (WSS_Config::REST_METHODS);
+		// OPTIONS is the CORS preflight.
+		return implode( ', ', array_merge( WSS_Config::REST_METHODS, [ 'OPTIONS' ] ) );
+	}
 
-		if ( substr( $route, -12 ) === '/links/batch' ) {
-			return 'POST, OPTIONS';
+	/**
+	 * Headers that keep a reverse proxy away from an answer.
+	 *
+	 * Every route accepts GET because clients need it, but the answer depends
+	 * on the authenticated user (drafts, private posts), so NGINX in front of
+	 * the site must not cache it: no-store plus Vary: Authorization. Sent on
+	 * success and on every error path, including the early 401.
+	 */
+	private function send_no_store_headers(): void {
+		if ( headers_sent() ) {
+			return;
 		}
 
-		return 'GET, POST, OPTIONS';
+		header( 'Cache-Control: no-store, no-cache, must-revalidate, private' );
+		header( 'Pragma: no-cache' );
+		header( 'Vary: Authorization' );
 	}
 
 	/* ============================================================
@@ -714,24 +733,24 @@ final class WSS_Rest_Controller {
 			);
 		}
 
-		$q_raw = $request->get_param( 'q' );
+		$q_raw = $this->param( $request, 'q' );
 		$q_str = is_string( $q_raw ) ? trim( (string) $q_raw ) : '';
 
 		// For scope=links q may be omitted — the engine then takes it from
 		// url/domain/host/anchor. For posts/all q is required.
-		$scope = (string) ( $request->get_param( 'scope' ) ?? 'posts' );
+		$scope = (string) ( $this->param( $request, 'scope' ) ?? 'posts' );
 		$scope = sanitize_key( $scope );
 		if ( ! in_array( $scope, WSS_Config::SCOPES, true ) ) {
 			$scope = 'posts';
 		}
 
-		$url_p    = (string) ( $request->get_param( 'url' )    ?? '' );
-		$domain_p = (string) ( $request->get_param( 'domain' ) ?? '' );
-		$host_p   = (string) ( $request->get_param( 'host' )   ?? '' );
-		$anchor_p = (string) ( $request->get_param( 'anchor' ) ?? '' );
+		$url_p    = (string) ( $this->param( $request, 'url' )    ?? '' );
+		$domain_p = (string) ( $this->param( $request, 'domain' ) ?? '' );
+		$host_p   = (string) ( $this->param( $request, 'host' )   ?? '' );
+		$anchor_p = (string) ( $this->param( $request, 'anchor' ) ?? '' );
 
-		$post_id_p     = $request->get_param( 'post_id' );
-		$anchor_kind_p = $request->get_param( 'anchor_kind' );
+		$post_id_p     = $this->param( $request, 'post_id' );
+		$anchor_kind_p = $this->param( $request, 'anchor_kind' );
 
 		$has_link_filter = ( $url_p !== '' || $domain_p !== '' || $host_p !== '' || $anchor_p !== '' )
 			|| ! empty( $post_id_p )
@@ -763,30 +782,30 @@ final class WSS_Rest_Controller {
 
 		$input = [
 			'query'      => $q_str,
-			'refang'     => $request->get_param( 'refang' ),
+			'refang'     => $this->param( $request, 'refang' ),
 			'scope'      => $scope,
-			'type'       => (string) ( $request->get_param( 'type' ) ?? 'posts' ),
-			'match'      => (string) ( $request->get_param( 'match' ) ?? 'auto' ),
-			'page'       => (int) ( $request->get_param( 'page' ) ?? 1 ),
-			'per_page'   => (int) ( $request->get_param( 'per_page' ) ?? WSS_Config::POSTS_PER_PAGE_MAX ),
-			'statuses'   => ( $request->get_param( 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES ),
-			'date_range' => (string) ( $request->get_param( 'date_range' ) ?? 'any' ),
-			'date_from'  => (string) ( $request->get_param( 'date_from' ) ?? '' ),
-			'date_to'    => (string) ( $request->get_param( 'date_to' ) ?? '' ),
-			'author'     => (int) ( $request->get_param( 'author' ) ?? 0 ),
-			'post_type'  => (string) ( $request->get_param( 'post_type' ) ?? 'post' ),
-			'orderby'    => (string) ( $request->get_param( 'orderby' ) ?? 'date_desc' ),
-			'exclude'    => (array) ( $request->get_param( 'exclude' ) ?? [] ),
-			'exclude_id' => (array) ( $request->get_param( 'exclude_id' ) ?? [] ),
+			'type'       => (string) ( $this->param( $request, 'type' ) ?? 'posts' ),
+			'match'      => (string) ( $this->param( $request, 'match' ) ?? 'auto' ),
+			'page'       => (int) ( $this->param( $request, 'page' ) ?? 1 ),
+			'per_page'   => (int) ( $this->param( $request, 'per_page' ) ?? WSS_Config::POSTS_PER_PAGE_MAX ),
+			'statuses'   => ( $this->param( $request, 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES ),
+			'date_range' => (string) ( $this->param( $request, 'date_range' ) ?? 'any' ),
+			'date_from'  => (string) ( $this->param( $request, 'date_from' ) ?? '' ),
+			'date_to'    => (string) ( $this->param( $request, 'date_to' ) ?? '' ),
+			'author'     => (int) ( $this->param( $request, 'author' ) ?? 0 ),
+			'post_type'  => (string) ( $this->param( $request, 'post_type' ) ?? 'post' ),
+			'orderby'    => (string) ( $this->param( $request, 'orderby' ) ?? 'date_desc' ),
+			'exclude'    => (array) ( $this->param( $request, 'exclude' ) ?? [] ),
+			'exclude_id' => (array) ( $this->param( $request, 'exclude_id' ) ?? [] ),
 			'url'        => $url_p,
 			'domain'     => $domain_p,
 			'host'       => $host_p,
 			'anchor'     => $anchor_p,
-			'anchor_match' => (string) ( $request->get_param( 'anchor_match' ) ?? 'words' ),
+			'anchor_match' => (string) ( $this->param( $request, 'anchor_match' ) ?? 'words' ),
 			'anchor_kind'  => $anchor_kind_p,
 			'post_id'    => $post_id_p,
-			'fields'     => $request->get_param( 'fields' ),
-			'exact_total' => $request->get_param( 'exact_total' ),
+			'fields'     => $this->param( $request, 'fields' ),
+			'exact_total' => $this->param( $request, 'exact_total' ),
 		];
 
 		$result = $this->engine->do_search( $input, true );
@@ -795,6 +814,40 @@ final class WSS_Rest_Controller {
 		}
 
 		return new WP_REST_Response( $result, 200 );
+	}
+
+	/**
+	 * Request parameter with a merged, body-first lookup.
+	 *
+	 * Every route accepts GET and POST, and a POST may carry its parameters in
+	 * the query string (clients often build the URL first and add a body
+	 * later). The merge is explicit here, in one place: a JSON body wins over
+	 * a form body, both win over the query string.
+	 *
+	 * @param WP_REST_Request $request
+	 * @param string          $key
+	 * @param mixed           $default
+	 * @return mixed
+	 */
+	private function param( WP_REST_Request $request, string $key, $default = null ) {
+		$json = $request->get_json_params();
+		if ( is_array( $json ) && array_key_exists( $key, $json ) ) {
+			return $json[ $key ];
+		}
+
+		$body = $request->get_body_params();
+		if ( is_array( $body ) && array_key_exists( $key, $body ) ) {
+			return $body[ $key ];
+		}
+
+		$query = $request->get_query_params();
+		if ( is_array( $query ) && array_key_exists( $key, $query ) ) {
+			return $query[ $key ];
+		}
+
+		$params = $request->get_params();
+
+		return is_array( $params ) && array_key_exists( $key, $params ) ? $params[ $key ] : $default;
 	}
 
 	/**
@@ -831,7 +884,7 @@ final class WSS_Rest_Controller {
 		$total   = 0;
 
 		foreach ( $map as $param => $type ) {
-			$values = $request->get_param( $param );
+			$values = $this->param( $request, $param );
 			if ( ! is_array( $values ) ) {
 				continue;
 			}
@@ -866,12 +919,12 @@ final class WSS_Rest_Controller {
 		}
 
 		$input = [
-			'per_page'     => $request->get_param( 'per_page' ),
-			'post_type'    => (string) ( $request->get_param( 'post_type' ) ?? 'post' ),
-			'statuses'     => $request->get_param( 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES,
-			'fields'       => $request->get_param( 'fields' ),
-			'anchor_match' => (string) ( $request->get_param( 'anchor_match' ) ?? 'words' ),
-			'anchor_kind'  => $request->get_param( 'anchor_kind' ),
+			'per_page'     => $this->param( $request, 'per_page' ),
+			'post_type'    => (string) ( $this->param( $request, 'post_type' ) ?? 'post' ),
+			'statuses'     => $this->param( $request, 'statuses' ) ?? WSS_Config::ALLOWED_STATUSES,
+			'fields'       => $this->param( $request, 'fields' ),
+			'anchor_match' => (string) ( $this->param( $request, 'anchor_match' ) ?? 'words' ),
+			'anchor_kind'  => $this->param( $request, 'anchor_kind' ),
 		];
 
 		$result = $this->engine->do_links_batch( $lookups, $input, true );
@@ -896,40 +949,58 @@ final class WSS_Rest_Controller {
 	}
 
 	/**
-	 * POST /wss/v1/index/rebuild — queue the background rebuild and answer.
+	 * GET|POST /wss/v1/index/rebuild — queue the background rebuild and answer.
 	 *
 	 * The job runs in WP-Cron; the request only schedules it, so it never
-	 * blocks on a long rebuild.
+	 * blocks on a long rebuild. Both verbs are accepted (NGINX caches GET),
+	 * which makes a repeated call — a proxy retry, a double click — safe: a
+	 * job that is already running keeps its cursor and one scheduled event,
+	 * and the answer says so.
 	 */
 	public function handle_index_rebuild( WP_REST_Request $request ) {
+		$running = ! WSS_Index_Backfill::report()['done'];
+
 		WSS_Index_Backfill::start();
 
 		$report = WSS_Index_Backfill::report();
 
 		return new WP_REST_Response( [
-			'accepted'    => true,
-			'queued'      => true,
-			'state'       => $report['state'],
-			'posts_total' => $report['posts_total'],
-			'processed'   => $report['processed'],
-			'last_run'    => $report['last_run'],
+			'accepted'       => true,
+			'queued'         => true,
+			'already_running' => $running,
+			'state'          => $report['state'],
+			'posts_total'    => $report['posts_total'],
+			'processed'      => $report['processed'],
+			'last_run'       => $report['last_run'],
 		], 202 );
 	}
 
 	/**
-	 * POST /wss/v1/index/recreate — drop the index and create it again.
+	 * GET|POST /wss/v1/index/recreate — drop the index and create it again.
 	 *
 	 * The body must carry {"confirm":"recreate"}: the action deletes every
 	 * indexed row, and a mistyped request must not do that by accident.
+	 * Recreating while a rebuild is running is refused: the worker would be
+	 * writing into a table that no longer exists.
 	 */
 	public function handle_index_recreate( WP_REST_Request $request ) {
-		$confirm = $request->get_param( 'confirm' );
+		$confirm = $this->param( $request, 'confirm' );
 
 		if ( 'recreate' !== ( is_string( $confirm ) ? trim( $confirm ) : '' ) ) {
 			return new WP_Error(
 				'wss_confirm_required',
 				__( 'Пересоздание удалит индекс. Передайте confirm=recreate, чтобы подтвердить.', 'wp-smart-search' ),
 				[ 'status' => 400 ]
+			);
+		}
+
+		$before = WSS_Index_Backfill::report();
+
+		if ( ! $before['done'] && 'empty' !== $before['state'] ) {
+			return new WP_Error(
+				'wss_busy',
+				__( 'Идёт пересборка индекса: дождитесь её завершения или остановите её, затем пересоздайте таблицу.', 'wp-smart-search' ),
+				[ 'status' => 409 ]
 			);
 		}
 
@@ -998,7 +1069,7 @@ final class WSS_Rest_Controller {
 	 * unknown tag is a 200 with an empty list, never a 404.
 	 */
 	public function handle_tags( WP_REST_Request $request ) {
-		$rl = $this->rate_limiter->check( WSS_Config::TAGS_RATE_MAX, 'rl_tags' );
+		$rl = $this->rate_limiter->check( WSS_Config::tags_rate_limit(), 'rl_tags' );
 		$this->rate_limiter->send_headers( $rl );
 
 		if ( empty( $rl['allowed'] ) ) {
@@ -1010,15 +1081,15 @@ final class WSS_Rest_Controller {
 		}
 
 		$result = $this->tags->query( [
-			'slug'           => $request->get_param( 'slug' ),
-			'search'         => $request->get_param( 'search' ),
-			'prefix'         => $request->get_param( 'prefix' ),
-			'post_id'        => $request->get_param( 'post_id' ),
-			'taxonomy'       => $request->get_param( 'taxonomy' ),
-			'include_counts' => $request->get_param( 'include_counts' ),
-			'page'           => $request->get_param( 'page' ),
-			'per_page'       => $request->get_param( 'per_page' ),
-			'fields'         => $request->get_param( 'fields' ),
+			'slug'           => $this->param( $request, 'slug' ),
+			'search'         => $this->param( $request, 'search' ),
+			'prefix'         => $this->param( $request, 'prefix' ),
+			'post_id'        => $this->param( $request, 'post_id' ),
+			'taxonomy'       => $this->param( $request, 'taxonomy' ),
+			'include_counts' => $this->param( $request, 'include_counts' ),
+			'page'           => $this->param( $request, 'page' ),
+			'per_page'       => $this->param( $request, 'per_page' ),
+			'fields'         => $this->param( $request, 'fields' ),
 		] );
 
 		if ( is_wp_error( $result ) ) {
@@ -1064,6 +1135,10 @@ final class WSS_Rest_Controller {
 			// Update diagnostics: the real basename and what the
 			// update_plugins transient holds for our main file.
 			'update'               => WSS_GitHub_Updater::diagnostic(),
+			// Effective /tags limit and its origin (filter, constant, default):
+			// the plugin must refuse before a proxy bucket turns 429 into 503.
+			'tags_rate_limit'        => WSS_Config::tags_rate_limit(),
+			'tags_rate_limit_source' => WSS_Config::tags_rate_limit_source(),
 			'api_version'          => 'v1',
 			// redis | none — see WSS_Cache::backend().
 			'cache_backend'        => WSS_Cache::backend(),

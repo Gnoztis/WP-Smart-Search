@@ -111,11 +111,57 @@ final class WSS_Config {
 	public const TAGS_GEN_OPTION = 'wss_tags_gen';
 
 	/** 60 requests per minute per user — a stricter bucket than /search. */
-	public const TAGS_RATE_MAX = 60;
-	public const TAGS_RATE_WIN = 60;
+	/**
+	 * 30 requests per minute per user: the plugin must answer 429 before an
+	 * NGINX bucket in front of the site turns the same burst into an HTML 503.
+	 * A site can lower it through the WSS_TAGS_RATE_LIMIT constant or the
+	 * wss_tags_rate_limit filter; the effective value is reported by /me.
+	 */
+	public const TAGS_RATE_LIMIT = 30;
+	public const TAGS_RATE_WIN   = 60;
+
+	/**
+	 * Effective limit of GET|POST /wss/v1/tags.
+	 *
+	 * Kept below the proxy limit on purpose: a 429 with Retry-After and JSON
+	 * body is parseable, an HTML 503 from NGINX is not.
+	 */
+	public static function tags_rate_limit(): int {
+		$default = self::TAGS_RATE_LIMIT;
+		$limit   = defined( 'WSS_TAGS_RATE_LIMIT' ) ? (int) WSS_TAGS_RATE_LIMIT : $default;
+		$limit   = (int) apply_filters( 'wss_tags_rate_limit', $limit );
+
+		return max( 1, min( 1000, $limit ) );
+	}
+
+	/**
+	 * Where the effective limit came from: filter, constant or the default.
+	 */
+	public static function tags_rate_limit_source(): string {
+		$default = self::TAGS_RATE_LIMIT;
+		$base    = defined( 'WSS_TAGS_RATE_LIMIT' ) ? (int) WSS_TAGS_RATE_LIMIT : $default;
+		$limit   = (int) apply_filters( 'wss_tags_rate_limit', $base );
+
+		if ( $limit !== $base ) {
+			return 'filter';
+		}
+
+		return $base !== $default ? 'constant' : 'default';
+	}
 
 	public const RATE_LIMIT_MAX = 120;
 	public const RATE_LIMIT_WIN = 60;
+
+	/**
+	 * Methods every REST route accepts.
+	 *
+	 * The site sits behind an NGINX cache that caches GET responses, so a
+	 * client must not depend on one verb: a write that a proxy may repeat
+	 * (GET) still has to be idempotent, and a read must work over POST too.
+	 * Keeping the list here means a new route cannot be added single-method
+	 * by accident.
+	 */
+	public const REST_METHODS = [ 'GET', 'POST' ];
 
 	public const PURGE_STATUSES   = [ 'publish', 'future' ];
 	public const ALLOWED_STATUSES = [ 'publish', 'draft', 'pending', 'private', 'future' ];
@@ -241,5 +287,28 @@ final class WSS_Config {
 
 	public static function user_can_rebuild(): bool {
 		return is_user_logged_in() && current_user_can( self::rebuild_capability() );
+	}
+
+	/**
+	 * SEC-001 A09: one line per security event, no secrets.
+	 *
+	 * Events: nonce_failed, cap_denied, object_denied, github_rate_limit,
+	 * github_unauthorized, github_forbidden. No e-mail, IP or request content.
+	 *
+	 * @param string $event   Event name from the vocabulary above.
+	 * @param string $context Short handler label, e.g. "ajax:index_step".
+	 */
+	public static function log_security_event( string $event, string $context = '' ): void {
+		if ( ! function_exists( 'error_log' ) ) {
+			return;
+		}
+
+		$line = '[wss] security: ' . $event;
+
+		if ( $context !== '' ) {
+			$line .= ' ' . str_replace( [ "\r", "\n" ], ' ', $context );
+		}
+
+		error_log( $line ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- A09 security event, no secrets.
 	}
 }
