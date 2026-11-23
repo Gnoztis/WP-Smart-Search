@@ -484,6 +484,12 @@ final class WSS_Rest_Controller {
 
 	/* ============================================================
 	 *  Args
+	 *
+	 *  No sanitize_callback is set on purpose: REST sanitises BEFORE it
+	 *  validates, and sanitize_key( array ) is a TypeError in PHP 8 — an
+	 *  array sent to scope/type/match/post_type would answer 500 instead of
+	 *  400. The handlers read the raw value (param()) and validate it, so an
+	 *  unusable value becomes a wss_* 400 with a readable message.
 	 * ============================================================ */
 
 	private function search_args(): array {
@@ -491,39 +497,39 @@ final class WSS_Rest_Controller {
 			'q'          => [
 				'description'       => __( 'Поисковый запрос (мин. 2 символа); слова ищутся по основам, между словами — И.', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'refang'     => [
 				'description'       => __( 'Auto-refang (по умолчанию true).', 'wp-smart-search' ),
 				'type'              => 'boolean',
-				'sanitize_callback' => 'rest_sanitize_boolean',
+				'sanitize_callback' => null,
 			],
 			'scope'      => [
 				'description'       => __( 'posts | links | all (по умолчанию posts).', 'wp-smart-search' ),
 				'type'              => 'string',
 				'enum'              => WSS_Config::SCOPES,
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'type'       => [
 				'description'       => __( 'all | tags | posts (по умолчанию posts для API).', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'match'      => [
 				'description'       => __( 'auto | fuzzy | exact (по умолчанию auto).', 'wp-smart-search' ),
 				'type'              => 'string',
 				'enum'              => WSS_Config::MATCH_MODES,
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'page'       => [
 				'description'       => __( 'Страница (1..N).', 'wp-smart-search' ),
 				'type'              => 'integer',
-				'sanitize_callback' => 'absint',
+				'sanitize_callback' => null,
 			],
 			'per_page'   => [
 				'description'       => __( 'Элементов на страницу (1..50).', 'wp-smart-search' ),
 				'type'              => 'integer',
-				'sanitize_callback' => 'absint',
+				'sanitize_callback' => null,
 			],
 			'statuses'   => [
 				'description' => __( 'Массив статусов или строка через запятую. Неизвестный статус — 400.', 'wp-smart-search' ),
@@ -531,32 +537,32 @@ final class WSS_Rest_Controller {
 			'date_range' => [
 				'description'       => __( 'any | today | week | month | year', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'date_from'  => [
 				'description'       => __( 'С ISO-даты (включительно).', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'date_to'    => [
 				'description'       => __( 'По ISO-дату (включительно).', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'author'     => [
 				'description'       => __( 'ID автора (только для edit_others_posts).', 'wp-smart-search' ),
 				'type'              => 'integer',
-				'sanitize_callback' => 'absint',
+				'sanitize_callback' => null,
 			],
 			'post_type'  => [
 				'description'       => __( 'post | page | … (по умолчанию post); неизвестный тип — 400.', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'orderby'    => [
 				'description'       => __( 'date_desc | date_asc', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'exclude'    => [
 				'description' => __( 'ID записей для исключения (массив, максимум 200).', 'wp-smart-search' ),
@@ -568,28 +574,28 @@ final class WSS_Rest_Controller {
 			'url'        => [
 				'description'       => __( 'Точный URL (нормализуется).', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'domain'     => [
 				'description'       => __( 'Registrable domain (включая поддомены).', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'host'       => [
 				'description'       => __( 'Точный host (без поддоменов).', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'anchor'     => [
 				'description'       => __( 'Подстрока в anchor-тексте.', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
+				'sanitize_callback' => null,
 			],
 			'anchor_match' => [
 				'description'       => __( 'Семантика anchor: words (по словам, по умолчанию), exact или substring.', 'wp-smart-search' ),
 				'type'              => 'string',
 				'enum'              => WSS_Config::ANCHOR_MATCH_MODES,
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'anchor_kind' => [
 				'description' => __( 'Тип анкора: phrase, url, empty, unknown (можно списком).', 'wp-smart-search' ),
@@ -608,7 +614,7 @@ final class WSS_Rest_Controller {
 			'exact_total' => [
 				'description'       => __( 'Считать точный total (по умолчанию true; false экономит один запрос COUNT).', 'wp-smart-search' ),
 				'type'              => 'boolean',
-				'sanitize_callback' => 'rest_sanitize_boolean',
+				'sanitize_callback' => null,
 			],
 		];
 	}
@@ -649,17 +655,17 @@ final class WSS_Rest_Controller {
 			'include_counts' => [
 				'description'       => __( 'Вернуть count (число постов), по умолчанию true.', 'wp-smart-search' ),
 				'type'              => 'boolean',
-				'sanitize_callback' => 'rest_sanitize_boolean',
+				'sanitize_callback' => null,
 			],
 			'page'           => [
 				'description'       => __( 'Страница, с 1.', 'wp-smart-search' ),
 				'type'              => 'integer',
-				'sanitize_callback' => 'absint',
+				'sanitize_callback' => null,
 			],
 			'per_page'       => [
 				'description'       => __( 'Элементов на страницу, 1..100, по умолчанию 20.', 'wp-smart-search' ),
 				'type'              => 'integer',
-				'sanitize_callback' => 'absint',
+				'sanitize_callback' => null,
 			],
 			'fields'         => [
 				'description' => __( 'Поля items через запятую: id, name, slug, count. Неизвестное поле — 400.', 'wp-smart-search' ),
@@ -693,12 +699,12 @@ final class WSS_Rest_Controller {
 			'per_page'   => [
 				'description'       => __( 'Элементов на каждый запрос (1..50, по умолчанию 5).', 'wp-smart-search' ),
 				'type'              => 'integer',
-				'sanitize_callback' => 'absint',
+				'sanitize_callback' => null,
 			],
 			'post_type'  => [
 				'description'       => __( 'Тип записи (по умолчанию post).', 'wp-smart-search' ),
 				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'statuses'   => [
 				'description' => __( 'Массив статусов или строка через запятую.', 'wp-smart-search' ),
@@ -707,7 +713,7 @@ final class WSS_Rest_Controller {
 				'description'       => __( 'Семантика anchors: words (по словам, по умолчанию), exact или substring.', 'wp-smart-search' ),
 				'type'              => 'string',
 				'enum'              => WSS_Config::ANCHOR_MATCH_MODES,
-				'sanitize_callback' => 'sanitize_key',
+				'sanitize_callback' => null,
 			],
 			'anchor_kind' => [
 				'description' => __( 'Тип анкора: phrase, url, empty, unknown (можно списком).', 'wp-smart-search' ),
@@ -756,12 +762,42 @@ final class WSS_Rest_Controller {
 		$q_raw = $this->param( $request, 'q' );
 		$q_str = is_string( $q_raw ) ? trim( (string) $q_raw ) : '';
 
-		// For scope=links q may be omitted — the engine then takes it from
-		// url/domain/host/anchor. For posts/all q is required.
-		$scope = (string) ( $this->param( $request, 'scope' ) ?? 'posts' );
-		$scope = sanitize_key( $scope );
-		if ( ! in_array( $scope, WSS_Config::SCOPES, true ) ) {
+		// scope is a mode with a documented default, but only when it is
+		// absent. A present value that cannot be applied is a 400: the old
+		// code coerced it to "posts" before the engine saw it, so
+		// scope=garbage answered 200 and searched posts while the client
+		// believed it searched links.
+		if ( ! $this->has_param( $request, 'scope' ) ) {
 			$scope = 'posts';
+		} else {
+			$raw_scope = $this->param( $request, 'scope' );
+
+			if ( ! is_string( $raw_scope ) || '' === trim( $raw_scope ) ) {
+				return new WP_Error(
+					'wss_invalid_scope',
+					sprintf(
+						/* translators: %s: allowed scopes */
+						__( 'Недопустимый scope. Разрешены: %s.', 'wp-smart-search' ),
+						implode( ', ', WSS_Config::SCOPES )
+					),
+					[ 'status' => 400 ]
+				);
+			}
+
+			$scope = sanitize_key( $raw_scope );
+
+			if ( ! in_array( $scope, WSS_Config::SCOPES, true ) ) {
+				return new WP_Error(
+					'wss_invalid_scope',
+					sprintf(
+						/* translators: 1: given scope, 2: allowed scopes */
+						__( 'Недопустимый scope: %1$s. Разрешены: %2$s.', 'wp-smart-search' ),
+						$scope,
+						implode( ', ', WSS_Config::SCOPES )
+					),
+					[ 'status' => 400 ]
+				);
+			}
 		}
 
 		$url_p    = (string) ( $this->param( $request, 'url' )    ?? '' );

@@ -875,7 +875,7 @@ final class WSS_Admin_Page {
 			</p>
 
 			<p class="wss-panel-text">
-				<?php esc_html_e( 'То же правило пустых значений: author, post_id, date_from, date_to, type, match, scope, post_type, exclude переданные как null или "" дают 400, а не «без фильтра» (author: null раньше означал «все авторы», date_from: null — «весь архив»). Пустой q без фильтра по ссылке — 400 wss_empty.', 'wp-smart-search' ); ?>
+				<?php esc_html_e( 'То же правило пустых значений: author, post_id, date_from, date_to, type, match, scope, post_type, exclude переданные как null или "" дают 400, а не «без фильтра» (author: null раньше означал «все авторы», date_from: null — «весь архив»). Пустой q без фильтра по ссылке — 400 wss_empty. scope/type/match с недопустимым значением — 400 с перечнем разрешённых, а не тихий дефолт.', 'wp-smart-search' ); ?>
 			</p>
 
 			<?php
