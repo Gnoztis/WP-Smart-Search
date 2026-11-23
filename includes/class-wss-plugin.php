@@ -12,6 +12,7 @@ final class WSS_Plugin {
 	private WSS_Links_Indexer   $links_indexer;
 	private WSS_Index_Backfill  $backfill;
 	private WSS_Search_Engine   $engine;
+	private WSS_Tags            $tags;
 	private WSS_Ajax_Handler    $ajax;
 	private WSS_Rest_Controller $rest;
 	private WSS_Admin_Page      $admin;
@@ -30,8 +31,9 @@ final class WSS_Plugin {
 		$this->links_indexer = new WSS_Links_Indexer();
 		$this->backfill      = new WSS_Index_Backfill( $this->links_indexer );
 		$this->engine        = new WSS_Search_Engine( $this->cache );
+		$this->tags          = new WSS_Tags( $this->cache );
 		$this->ajax          = new WSS_Ajax_Handler( $this->engine, $this->rate_limiter, $this->backfill );
-		$this->rest          = new WSS_Rest_Controller( $this->engine, $this->rate_limiter );
+		$this->rest          = new WSS_Rest_Controller( $this->engine, $this->rate_limiter, $this->backfill, $this->tags );
 		$this->admin         = new WSS_Admin_Page();
 		$this->updater       = new WSS_GitHub_Updater();
 	}
@@ -40,6 +42,7 @@ final class WSS_Plugin {
 		$this->cache->register_hooks();
 		$this->links_indexer->register_hooks();
 		$this->backfill->register_hooks();
+		$this->tags->register_hooks();
 		$this->ajax->register_hooks();
 		$this->rest->register_hooks();
 		$this->admin->register_hooks();

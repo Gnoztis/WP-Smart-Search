@@ -8,11 +8,13 @@ final class WSS_Rest_Controller {
 	private WSS_Search_Engine $engine;
 	private WSS_Rate_Limiter  $rate_limiter;
 	private WSS_Index_Backfill $backfill;
+	private WSS_Tags $tags;
 
-	public function __construct( WSS_Search_Engine $engine, WSS_Rate_Limiter $rate_limiter, ?WSS_Index_Backfill $backfill = null ) {
+	public function __construct( WSS_Search_Engine $engine, WSS_Rate_Limiter $rate_limiter, ?WSS_Index_Backfill $backfill = null, ?WSS_Tags $tags = null ) {
 		$this->engine       = $engine;
 		$this->rate_limiter = $rate_limiter;
 		$this->backfill     = $backfill ?? new WSS_Index_Backfill();
+		$this->tags         = $tags ?? new WSS_Tags( new WSS_Cache() );
 	}
 
 	public function register_hooks(): void {
@@ -83,6 +85,15 @@ final class WSS_Rest_Controller {
 			'methods'             => [ 'POST' ],
 			'callback'            => [ $this, 'handle_index_recreate' ],
 			'permission_callback' => [ $this, 'permission_check_admin' ],
+		] );
+
+		// Terms: the pipeline used to call /wp/v2/tags twice per material
+		// (slug, then search). One request answers both.
+		register_rest_route( WSS_Config::REST_NAMESPACE, '/tags', [
+			'methods'             => [ 'GET' ],
+			'callback'            => [ $this, 'handle_tags' ],
+			'permission_callback' => [ $this, 'permission_check' ],
+			'args'                => $this->tags_args(),
 		] );
 	}
 
@@ -583,11 +594,64 @@ final class WSS_Rest_Controller {
 		];
 	}
 
+	/**
+	 * Arguments of GET /tags.
+	 *
+	 * The cross-parameter rules (slug+search, minimum lengths, the 50-slug
+	 * cap) are validated in WSS_Tags so the errors keep the wss_* codes.
+	 */
+	private function tags_args(): array {
+		return [
+			'slug'           => [
+				'description'       => __( 'Слаг или до 50 слагов через запятую.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'search'         => [
+				'description'       => __( 'Подстрока имени, минимум 3 символа, регистр не важен.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'prefix'         => [
+				'description'       => __( 'Имя начинается с подстроки, минимум 2 символа.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+			],
+			'post_id'        => [
+				'description'       => __( 'Вернуть метки указанной записи.', 'wp-smart-search' ),
+				'type'              => 'integer',
+				'sanitize_callback' => 'absint',
+			],
+			'taxonomy'       => [
+				'description'       => __( 'post_tag (по умолчанию), category или any.', 'wp-smart-search' ),
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_key',
+			],
+			'include_counts' => [
+				'description'       => __( 'Вернуть count (число постов), по умолчанию true.', 'wp-smart-search' ),
+				'type'              => 'boolean',
+				'sanitize_callback' => 'rest_sanitize_boolean',
+			],
+			'page'           => [
+				'description'       => __( 'Страница, с 1.', 'wp-smart-search' ),
+				'type'              => 'integer',
+				'sanitize_callback' => 'absint',
+			],
+			'per_page'       => [
+				'description'       => __( 'Элементов на страницу, 1..100, по умолчанию 20.', 'wp-smart-search' ),
+				'type'              => 'integer',
+				'sanitize_callback' => 'absint',
+			],
+			'fields'         => [
+				'description' => __( 'Поля items через запятую: id, name, slug, count. Неизвестное поле — 400.', 'wp-smart-search' ),
+			],
+		];
+	}
+
 	private function batch_args(): array {
 		$item = [ 'type' => 'string' ];
 
-		return [
-			'domains'    => [
+		return [			'domains'    => [
 				'description' => __( 'Домены для поиска ссылок (максимум 50 за вызов).', 'wp-smart-search' ),
 				'type'        => 'array',
 				'items'       => $item,
@@ -925,6 +989,43 @@ final class WSS_Rest_Controller {
 			'errors'              => (int) $report['errors'],
 			'cron'                => $report['cron'],
 		], 200 );
+	}
+
+	/**
+	 * GET /wss/v1/tags — terms by slug, by name (substring/prefix) or by post.
+	 *
+	 * Authorised and limited like /search, with its own 60/min bucket. An
+	 * unknown tag is a 200 with an empty list, never a 404.
+	 */
+	public function handle_tags( WP_REST_Request $request ) {
+		$rl = $this->rate_limiter->check( WSS_Config::TAGS_RATE_MAX, 'rl_tags' );
+		$this->rate_limiter->send_headers( $rl );
+
+		if ( empty( $rl['allowed'] ) ) {
+			return new WP_Error(
+				'wss_rate_limited',
+				__( 'Слишком много запросов. Подождите минуту.', 'wp-smart-search' ),
+				[ 'status' => 429 ]
+			);
+		}
+
+		$result = $this->tags->query( [
+			'slug'           => $request->get_param( 'slug' ),
+			'search'         => $request->get_param( 'search' ),
+			'prefix'         => $request->get_param( 'prefix' ),
+			'post_id'        => $request->get_param( 'post_id' ),
+			'taxonomy'       => $request->get_param( 'taxonomy' ),
+			'include_counts' => $request->get_param( 'include_counts' ),
+			'page'           => $request->get_param( 'page' ),
+			'per_page'       => $request->get_param( 'per_page' ),
+			'fields'         => $request->get_param( 'fields' ),
+		] );
+
+		if ( is_wp_error( $result ) ) {
+			return $this->as_rest_error( $result );
+		}
+
+		return new WP_REST_Response( $result, 200 );
 	}
 
 	public function handle_me( WP_REST_Request $request ) {

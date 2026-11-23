@@ -82,6 +82,38 @@ final class WSS_Config {
 	public const POSTS_CACHE_VER  = 'v14'; // v14: truncated match list without post_content.
 	public const CACHE_GEN_OPTION = 'wss_cache_gen';
 
+	/* ---------- GET /wss/v1/tags (the pipeline's term check) ---------- */
+
+	/** Slugs per batch: one SQL query, one response. */
+	public const TAGS_MAX_SLUGS = 50;
+
+	/** Shortest `search` substring (a shorter one is a 400). */
+	public const TAGS_MIN_SEARCH = 3;
+
+	/** Shortest `prefix` (a shorter one is a 400). */
+	public const TAGS_MIN_PREFIX = 2;
+
+	/** Terms per page for the endpoint, and its hard cap. */
+	public const TAGS_PER_PAGE     = 20;
+	public const TAGS_PER_PAGE_MAX = 100;
+
+	/** Fields a client may ask for in `fields`. */
+	public const TAGS_FIELDS = [ 'id', 'name', 'slug', 'count' ];
+
+	/** Taxonomies the endpoint exposes; anything else is a 400. */
+	public const TAGS_TAXONOMIES = [ 'post_tag', 'category' ];
+
+	/** Answers are cached for 60 seconds and dropped on every term change. */
+	public const TAGS_ENDPOINT_CACHE_TTL = 60;
+	public const TAGS_ENDPOINT_CACHE_VER = 'v1';
+
+	/** Cache generation bumped by created_term / edited_term / delete_term. */
+	public const TAGS_GEN_OPTION = 'wss_tags_gen';
+
+	/** 60 requests per minute per user — a stricter bucket than /search. */
+	public const TAGS_RATE_MAX = 60;
+	public const TAGS_RATE_WIN = 60;
+
 	public const RATE_LIMIT_MAX = 120;
 	public const RATE_LIMIT_WIN = 60;
 

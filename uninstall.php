@@ -31,6 +31,7 @@ if ( ! function_exists( 'wss_uninstall_site' ) ) {
 		delete_option( 'wss_index_backfill_state' );
 		delete_option( 'wss_index_runner' );
 		delete_option( 'wss_index_autoload_fixed' );
+		delete_option( 'wss_tags_gen' );
 		delete_transient( 'wss_index_backfill_lock' );
 
 		// The background rebuild is a single scheduled event; without this

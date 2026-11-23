@@ -308,6 +308,7 @@ final class WSS_Admin_Page {
 		$endpoint_rebuild  = rest_url( WSS_Config::REST_NAMESPACE . '/index/rebuild' );
 		$endpoint_step     = rest_url( WSS_Config::REST_NAMESPACE . '/index/step' );
 		$endpoint_recreate = rest_url( WSS_Config::REST_NAMESPACE . '/index/recreate' );
+		$endpoint_tags     = rest_url( WSS_Config::REST_NAMESPACE . '/tags' );
 
 		// Rendered with implode() so the block starts exactly at the first
 		// command: any indentation in the template would become part of the
@@ -452,6 +453,7 @@ final class WSS_Admin_Page {
 							'rebuild' => $endpoint_rebuild,
 							'step'    => $endpoint_step,
 							'recreate' => $endpoint_recreate,
+							'tags'     => $endpoint_tags,
 						]
 					);
 					?>
@@ -696,6 +698,35 @@ final class WSS_Admin_Page {
 	private function render_api_panel( array $endpoints ): void {
 		$json_flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
 
+		$tags_curl = 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \\' . "\n"
+			. '  "' . $endpoints['tags'] . '?slug=cve-2026-131914&per_page=20"';
+
+		$tags_json = (string) wp_json_encode(
+			[
+				'query'    => [
+					'slug'    => [ 'cve-2026-131914' ],
+					'search'  => null,
+					'prefix'  => null,
+					'post_id' => null,
+				],
+				'taxonomy' => 'post_tag',
+				'items'    => [
+					[
+						'id'    => 42188,
+						'name'  => 'CVE-2025-45737',
+						'slug'  => 'cve-2025-45737',
+						'count' => 1,
+					],
+				],
+				'total'    => 1,
+				'page'     => 1,
+				'per_page' => 20,
+				'has_more' => false,
+				'cached'   => false,
+			],
+			$json_flags
+		);
+
 		$rebuild_json = (string) wp_json_encode(
 			[
 				'accepted'    => true,
@@ -830,6 +861,34 @@ final class WSS_Admin_Page {
 
 			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример ответа (сокращённо)', 'wp-smart-search' ); ?></p>
 			<pre class="wss-api-code"><code><?php echo esc_html( $search_json ); ?></code></pre>
+		</details>
+
+		<details class="wss-doc">
+			<summary><?php esc_html_e( 'GET /tags — метки: существование, поиск, метки поста', 'wp-smart-search' ); ?></summary>
+
+			<p class="wss-api-line"><code>GET <?php echo esc_html( $endpoints['tags'] ); ?></code></p>
+
+			<p class="wss-panel-text">
+				<?php esc_html_e( 'Заменяет прямые вызовы /wp/v2/tags: проверка слага и поиск по имени — один запрос вместо двух, пакет до 50 слагов — тоже один. Отсутствующая метка — это 200 и пустой items, а не 404. Неавторизованный запрос — 401, лимит — 60 запросов в минуту на пользователя (429 с Retry-After).', 'wp-smart-search' ); ?>
+			</p>
+
+			<?php
+			$this->render_doc_table(
+				[
+					__( 'Параметр', 'wp-smart-search' ),
+					__( 'Тип', 'wp-smart-search' ),
+					__( 'Значения / по умолчанию', 'wp-smart-search' ),
+					__( 'Смысл', 'wp-smart-search' ),
+				],
+				$this->tags_param_docs()
+			);
+			?>
+
+			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример запроса', 'wp-smart-search' ); ?></p>
+			<pre class="wss-api-code"><code><?php echo esc_html( $tags_curl ); ?></code></pre>
+
+			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример ответа', 'wp-smart-search' ); ?></p>
+			<pre class="wss-api-code"><code><?php echo esc_html( $tags_json ); ?></code></pre>
 		</details>
 
 		<details class="wss-doc">
@@ -1187,6 +1246,25 @@ final class WSS_Admin_Page {
 	 *
 	 * @return array<int,array{0:string,1:string,2:string,3:string}>
 	 */
+	/**
+	 * Parameter rows of GET /tags.
+	 *
+	 * @return array<int,array{0:string,1:string,2:string,3:string}>
+	 */
+	private function tags_param_docs(): array {
+		return [
+			[ 'slug', 'string', __( 'до 50 через запятую', 'wp-smart-search' ), __( 'Точное сравнение по слагу (нижний регистр, пробелы → дефис), по индексу slug, без LIKE. Неизвестный слаг — просто нет в items.', 'wp-smart-search' ) ],
+			[ 'search', 'string', __( 'минимум 3 символа', 'wp-smart-search' ), __( 'Подстрока имени, регистр не важен. Вместе со slug — 400: для проверки существования достаточно slug.', 'wp-smart-search' ) ],
+			[ 'prefix', 'string', __( 'минимум 2 символа', 'wp-smart-search' ), __( 'Имя начинается с подстроки — подсказки для выбора существующей метки.', 'wp-smart-search' ) ],
+			[ 'post_id', 'integer', '—', __( 'Метки указанной записи. Приватная запись без прав на чтение — пустой items.', 'wp-smart-search' ) ],
+			[ 'taxonomy', 'string', 'post_tag, category, any', __( 'По умолчанию post_tag. any — все публичные таксономии; служебные (wp_*, post_format) не отдаются никогда.', 'wp-smart-search' ) ],
+			[ 'include_counts', 'boolean', 'true', __( 'Отдавать count (число постов). false убирает поле.', 'wp-smart-search' ) ],
+			[ 'page', 'integer', '1', __( 'Страница.', 'wp-smart-search' ) ],
+			[ 'per_page', 'integer', '1..100, по умолчанию 20', __( 'Элементов на страницу.', 'wp-smart-search' ) ],
+			[ 'fields', 'string', 'id, name, slug, count', __( 'Поля items через запятую; неизвестное поле — 400 со списком допустимых.', 'wp-smart-search' ) ],
+		];
+	}
+
 	private function batch_body_docs(): array {
 		return [
 			[

@@ -11,12 +11,19 @@ final class WSS_Rate_Limiter {
 		$this->cache = $cache;
 	}
 
-	public function check(): array {
+	/**
+	 * Counts the request and reports the budget.
+	 *
+	 * @param int    $max    Requests allowed per window.
+	 * @param string $bucket Separate counter (the tags endpoint has its own).
+	 * @return array{allowed:bool,limit:int,remaining:int,reset:int}
+	 */
+	public function check( int $max = WSS_Config::RATE_LIMIT_MAX, string $bucket = 'rl' ): array {
 		$uid = get_current_user_id();
 
 		$out = [
 			'allowed'   => false,
-			'limit'     => WSS_Config::RATE_LIMIT_MAX,
+			'limit'     => $max,
 			'remaining' => 0,
 			'reset'     => time() + WSS_Config::RATE_LIMIT_WIN,
 		];
@@ -25,10 +32,10 @@ final class WSS_Rate_Limiter {
 			return $out;
 		}
 
-		$res = $this->cache->rate_limit_incr( 'rl:' . $uid, WSS_Config::RATE_LIMIT_WIN );
+		$res = $this->cache->rate_limit_incr( $bucket . ':' . $uid, WSS_Config::RATE_LIMIT_WIN );
 
-		$out['allowed']   = $res['count'] <= WSS_Config::RATE_LIMIT_MAX;
-		$out['remaining'] = max( 0, WSS_Config::RATE_LIMIT_MAX - $res['count'] );
+		$out['allowed']   = $res['count'] <= $max;
+		$out['remaining'] = max( 0, $max - $res['count'] );
 		$out['reset']     = time() + (int) $res['ttl'];
 
 		return $out;
