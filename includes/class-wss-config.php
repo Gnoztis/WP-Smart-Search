@@ -30,6 +30,30 @@ final class WSS_Config {
 	public const MAX_QUERY_LEN      = 200;
 	public const POSTS_PER_PAGE     = 10;
 	public const POSTS_PER_PAGE_MAX = 50;
+
+	/**
+	 * Scheduled posts are enumerated without a text query, so a page may hold
+	 * more items: the list is a small table scan filtered by status.
+	 */
+	public const SCHEDULED_PER_PAGE_MAX = 100;
+
+	/**
+	 * Fields a post item may carry in /search (scheduled_only included).
+	 *
+	 * `id` is always present; an unknown name is a 400, not a silent drop.
+	 * Link fields keep their own whitelist (LINK_FIELDS) for scope=links/all.
+	 */
+	public const POST_FIELDS = [
+		'id',
+		'date',
+		'date_gmt',
+		'status',
+		'title',
+		'slug',
+		'url',
+		'author',
+		'type',
+	];
 	public const TAGS_SCAN          = 100;
 	public const TAGS_OUT           = 30;
 
@@ -79,7 +103,7 @@ final class WSS_Config {
 	public const TAGS_CACHE_TTL   = 86400;
 	public const TAGS_CACHE_VER   = 'v3'; // v3: morphology (word stems)
 	public const POSTS_CACHE_TTL  = 86400;
-	public const POSTS_CACHE_VER  = 'v14'; // v14: truncated match list without post_content.
+	public const POSTS_CACHE_VER  = 'v15'; // v15: slug, date_gmt and id-only projection for scheduled posts.
 	public const CACHE_GEN_OPTION = 'wss_cache_gen';
 
 	/* ---------- GET /wss/v1/tags (the pipeline's term check) ---------- */

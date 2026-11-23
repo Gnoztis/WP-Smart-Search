@@ -527,9 +527,12 @@ final class WSS_Rest_Controller {
 				'sanitize_callback' => null,
 			],
 			'per_page'   => [
-				'description'       => __( 'Элементов на страницу (1..50).', 'wp-smart-search' ),
+				'description'       => __( 'Элементов на страницу (1..50; при scheduled_only — до 100).', 'wp-smart-search' ),
 				'type'              => 'integer',
 				'sanitize_callback' => null,
+			],
+			'scheduled_only' => [
+				'description' => __( 'Режим запланированных: status=future, q можно не передавать; автор видит свои, редактор — все.', 'wp-smart-search' ),
 			],
 			'statuses'   => [
 				'description' => __( 'Массив статусов или строка через запятую. Неизвестный статус — 400.', 'wp-smart-search' ),
@@ -762,6 +765,13 @@ final class WSS_Rest_Controller {
 		$q_raw = $this->param( $request, 'q' );
 		$q_str = is_string( $q_raw ) ? trim( (string) $q_raw ) : '';
 
+		// scheduled_only is a mode: it selects status=future and makes the
+		// text query optional (the client enumerates the scheduled queue).
+		$scheduled_only = $this->bool_param( $request, 'scheduled_only' );
+		if ( is_wp_error( $scheduled_only ) ) {
+			return $scheduled_only;
+		}
+
 		// scope is a mode with a documented default, but only when it is
 		// absent. A present value that cannot be applied is a 400: the old
 		// code coerced it to "posts" before the engine saw it, so
@@ -820,11 +830,11 @@ final class WSS_Rest_Controller {
 				: ( $host_p !== '' ? $host_p : $anchor_p ) );
 		}
 
-		if ( $q_str === '' && ! $has_link_filter ) {
+		if ( $q_str === '' && ! $has_link_filter && ! $scheduled_only ) {
 			return new WP_Error( 'wss_empty', __( 'Параметр q не может быть пустым.', 'wp-smart-search' ), [ 'status' => 400 ] );
 		}
 
-		if ( mb_strlen( $q_str ) < WSS_Config::MIN_LEN && ! $has_link_filter ) {
+		if ( mb_strlen( $q_str ) < WSS_Config::MIN_LEN && ! $has_link_filter && ! $scheduled_only ) {
 			return new WP_Error(
 				'wss_too_short',
 				sprintf(
@@ -867,6 +877,23 @@ final class WSS_Rest_Controller {
 		// match, anchor_match) keeps the engine's own default when absent.
 		if ( ! array_key_exists( 'type', $input ) ) {
 			$input['type'] = 'posts';
+		}
+
+		$input['scheduled_only'] = $scheduled_only;
+
+		if ( $scheduled_only ) {
+			// The mode owns the status filter: future only.
+			$input['statuses'] = [ 'future' ];
+
+			if ( ! array_key_exists( 'per_page', $input ) ) {
+				$input['per_page'] = WSS_Config::SCHEDULED_PER_PAGE_MAX;
+			}
+
+			// Only posts the user could edit: an author sees their own
+			// scheduled queue, an editor (edit_others_posts) sees everyone's.
+			if ( ! current_user_can( 'edit_others_posts' ) ) {
+				$input['author'] = get_current_user_id();
+			}
 		}
 
 		if ( ! array_key_exists( 'per_page', $input ) ) {
@@ -976,6 +1003,56 @@ final class WSS_Rest_Controller {
 		}
 
 		return null;
+	}
+
+	/**
+	 * Boolean parameter: absent/null/""/blank keep the default, a value that
+	 * is not a boolean is a 400 — a mode never guesses.
+	 *
+	 * @param WP_REST_Request $request
+	 * @param string          $key
+	 * @param bool            $default
+	 * @return bool|WP_Error
+	 */
+	private function bool_param( WP_REST_Request $request, string $key, bool $default = false ) {
+		if ( ! $this->has_param( $request, $key ) ) {
+			return $default;
+		}
+
+		$value = $this->param( $request, $key );
+
+		if ( null === $value || '' === $value || ( is_string( $value ) && '' === trim( $value ) ) ) {
+			return $default;
+		}
+
+		if ( is_bool( $value ) ) {
+			return $value;
+		}
+
+		if ( is_int( $value ) && ( 0 === $value || 1 === $value ) ) {
+			return 1 === $value;
+		}
+
+		if ( is_string( $value ) ) {
+			$clean = strtolower( trim( $value ) );
+
+			if ( in_array( $clean, [ '1', 'true', 'on', 'yes' ], true ) ) {
+				return true;
+			}
+			if ( in_array( $clean, [ '0', 'false', 'off', 'no' ], true ) ) {
+				return false;
+			}
+		}
+
+		return new WP_Error(
+			'wss_invalid_scheduled_only',
+			sprintf(
+				/* translators: %s: parameter name */
+				__( 'Параметр %s должен быть true или false.', 'wp-smart-search' ),
+				$key
+			),
+			[ 'status' => 400 ]
+		);
 	}
 
 	/**

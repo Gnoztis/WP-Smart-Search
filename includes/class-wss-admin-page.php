@@ -772,6 +772,29 @@ final class WSS_Admin_Page {
 		$search_curl = 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \\' . "\n"
 			. '  "' . $endpoints['search'] . '?q=wordpress&per_page=10&scope=posts"';
 
+		$scheduled_curl = 'curl -s -u "user:xxxx xxxx xxxx xxxx xxxx xxxx" \\' . "\n"
+			. '  -H "Content-Type: application/json" \\' . "\n"
+			. '  -d \'{"scheduled_only": true, "per_page": 100, "fields": "id,date"}\' \\' . "\n"
+			. '  "' . $endpoints['search'] . '"';
+
+		$scheduled_json = (string) wp_json_encode(
+			[
+				'query'          => '',
+				'scheduled_only' => true,
+				'scope'          => 'posts',
+				'posts'          => [
+					'items'    => [
+						[ 'id' => 53204, 'date' => '2026-11-24T09:00:00+03:00' ],
+						[ 'id' => 53207, 'date' => '2026-11-24T12:30:00+03:00' ],
+					],
+					'total'    => 2,
+					'has_more' => false,
+					'cached'   => false,
+				],
+			],
+			$json_flags
+		);
+
 		$search_json = (string) wp_json_encode(
 			[
 				'query' => 'wordpress',
@@ -895,6 +918,11 @@ final class WSS_Admin_Page {
 
 			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример ответа (сокращённо)', 'wp-smart-search' ); ?></p>
 			<pre class="wss-api-code"><code><?php echo esc_html( $search_json ); ?></code></pre>
+
+			<p class="wss-panel-subtitle"><?php esc_html_e( 'Запланированные записи: scheduled_only + fields=id,date', 'wp-smart-search' ); ?></p>
+			<pre class="wss-api-code"><code><?php echo esc_html( $scheduled_curl ); ?></code></pre>
+			<p class="wss-panel-subtitle"><?php esc_html_e( 'Пример ответа (сокращённо)', 'wp-smart-search' ); ?></p>
+			<pre class="wss-api-code"><code><?php echo esc_html( $scheduled_json ); ?></code></pre>
 		</details>
 
 		<details class="wss-doc">
@@ -1172,12 +1200,19 @@ final class WSS_Admin_Page {
 				'per_page',
 				'integer',
 				sprintf(
-					/* translators: 1: maximum per page, 2: default per page */
-					__( '1…%1$d (по умолчанию %2$d)', 'wp-smart-search' ),
+					/* translators: 1: maximum per page, 2: default per page, 3: maximum for scheduled_only */
+					__( '1…%1$d (по умолчанию %2$d), при scheduled_only — до %3$d', 'wp-smart-search' ),
 					(int) WSS_Config::POSTS_PER_PAGE_MAX,
-					(int) WSS_Config::POSTS_PER_PAGE
+					(int) WSS_Config::POSTS_PER_PAGE,
+					(int) WSS_Config::SCHEDULED_PER_PAGE_MAX
 				),
-				__( 'Элементов на страницу.', 'wp-smart-search' ),
+				__( 'Элементов на страницу. Выше предела — 400 wss_invalid_per_page, а не тихое усечение.', 'wp-smart-search' ),
+			],
+			[
+				'scheduled_only',
+				'boolean',
+				__( 'false (по умолчанию)', 'wp-smart-search' ),
+				__( 'Режим запланированных: q можно не передавать, выбираются записи со статусом future. Права: автор видит свои запланированные, редактор (edit_others_posts) — все. q при этом остаётся дополнительным текстовым фильтром.', 'wp-smart-search' ),
 			],
 			[
 				'statuses',
@@ -1291,12 +1326,13 @@ final class WSS_Admin_Page {
 				'fields',
 				'array|string',
 				sprintf(
-					/* translators: 1: available fields, 2: always returned fields */
-					__( '%1$s; всегда возвращаются %2$s', 'wp-smart-search' ),
+					/* translators: 1: post fields, 2: link fields, 3: always returned link fields */
+					__( 'posts: %1$s; links: %2$s (всегда %3$s)', 'wp-smart-search' ),
+					implode( ', ', WSS_Config::POST_FIELDS ),
 					implode( ', ', WSS_Config::LINK_FIELDS ),
 					implode( ', ', WSS_Config::LINK_FIELDS_REQUIRED )
 				),
-				__( 'Проекция полей links.items. Неизвестное поле — 400.', 'wp-smart-search' ),
+				__( 'Проекция элементов. У posts id всегда присутствует; неизвестное поле — 400 wss_invalid_fields со списком допустимых.', 'wp-smart-search' ),
 			],
 			[
 				'exact_total',
@@ -1473,6 +1509,7 @@ final class WSS_Admin_Page {
 			[ 'wss_too_many_slugs', '400', __( 'Больше 50 слагов за один запрос.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_post_type', '400', __( 'post_type не зарегистрирован.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_type', '400', __( 'type не из all, tags, posts.', 'wp-smart-search' ) ],
+			[ 'wss_invalid_scheduled_only', '400', __( 'scheduled_only не true/false.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_match', '400', __( 'match не из auto, exact, words.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_scope', '400', __( 'scope не из posts, links, all.', 'wp-smart-search' ) ],
 			[ 'wss_invalid_page', '400', __( 'page не положительное целое.', 'wp-smart-search' ) ],

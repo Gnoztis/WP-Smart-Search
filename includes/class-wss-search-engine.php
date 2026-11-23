@@ -57,12 +57,18 @@ final class WSS_Search_Engine {
 
 		// A link query may have no words at all: "all links of these posts"
 		// (post_id) and "links of a kind" (anchor_kind) are complete queries.
+		// scheduled_only is the third case: it enumerates future posts, so the
+		// text query is optional (a q still narrows the list further).
+		$scheduled_only = ! empty( $input['scheduled_only'] );
+
 		$has_link_selector = ( null !== $this->post_id_filter( $input['post_id'] ?? null ) )
 			|| ( null !== $this->anchor_kind_filter( $input['anchor_kind'] ?? null, false ) );
 
+		$empty_query_ok = $has_link_selector || $scheduled_only;
+
 		$parsed = $this->parse_query( $raw );
 		if ( is_wp_error( $parsed ) ) {
-			if ( WSS_Config::SCOPE_POSTS === $scope || ! $has_link_selector ) {
+			if ( ! $empty_query_ok ) {
 				return $parsed;
 			}
 			$parsed = [
@@ -77,7 +83,7 @@ final class WSS_Search_Engine {
 		// The stem, not the whole word: "sandboxes" and "sandbox" must
 		// find each other.
 		$terms = WSS_Morphology::terms( $words );
-		if ( empty( $terms ) && ! ( WSS_Config::SCOPE_POSTS !== $scope && $has_link_selector ) ) {
+		if ( empty( $terms ) && ! $empty_query_ok ) {
 			return new WP_Error( 'invalid', __( 'Не удалось разобрать запрос.', 'wp-smart-search' ) );
 		}
 
@@ -87,11 +93,43 @@ final class WSS_Search_Engine {
 		}
 		$filters['query'] = $raw;
 
+		if ( $scheduled_only ) {
+			// The mode selects the status: whatever the client sent is
+			// overridden, otherwise scheduled_only=false would be a filter
+			// that silently does nothing.
+			$filters['statuses'] = [ 'future' ];
+		}
+
 		$per_page = $this->int_param( $input, 'per_page', WSS_Config::POSTS_PER_PAGE, 'wss_invalid_per_page', $is_api );
 		if ( is_wp_error( $per_page ) ) {
 			return $per_page;
 		}
-		$per_page = min( WSS_Config::POSTS_PER_PAGE_MAX, $per_page );
+
+		// Enumeration without a text query may hold more items; a normal
+		// search keeps the 50 cap and answers 400 above it.
+		$max_per_page = $scheduled_only ? WSS_Config::SCHEDULED_PER_PAGE_MAX : WSS_Config::POSTS_PER_PAGE_MAX;
+
+		if ( $per_page > $max_per_page ) {
+			return new WP_Error(
+				'wss_invalid_per_page',
+				sprintf(
+					/* translators: %d: maximum items per page */
+					__( 'per_page не больше %d.', 'wp-smart-search' ),
+					$max_per_page
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
+		$post_fields = null;
+
+		if ( array_key_exists( 'fields', $input ) ) {
+			$post_fields = $this->parse_post_fields( $input['fields'] );
+
+			if ( is_wp_error( $post_fields ) ) {
+				return $post_fields;
+			}
+		}
 
 		$patterns = $this->build_word_patterns( $terms );
 
@@ -99,20 +137,24 @@ final class WSS_Search_Engine {
 			'query'  => $raw,
 			'refang' => $refang,
 			'scope'  => $scope,
+			// Echoed for the client: the mode changes the meaning of `query`
+			// (empty query means "all scheduled posts").
+			'scheduled_only' => $scheduled_only,
 			'meta'   => [
 				'plugin_version' => WSS_VERSION,
 				'terms'          => array_values( $terms ),
 				'tokens'         => $parsed['tokens'],
 				'dropped_tokens' => $parsed['dropped'],
 				'max_words'      => WSS_Config::MAX_WORDS,
+				'scheduled_only' => $scheduled_only,
 			],
 		];
 
-		if ( WSS_Config::SCOPE_LINKS !== $scope && ! empty( $terms ) ) {
+		if ( WSS_Config::SCOPE_LINKS !== $scope && ( ! empty( $terms ) || $scheduled_only ) ) {
 			$payload['type']  = $type;
 			$payload['match'] = $match;
 
-			if ( $type === 'all' || $type === 'tags' ) {
+			if ( ( $type === 'all' || $type === 'tags' ) && ! empty( $terms ) ) {
 				$payload['tags'] = $this->search_tags( $terms );
 			}
 			if ( $type === 'all' || $type === 'posts' ) {
@@ -125,6 +167,16 @@ final class WSS_Search_Engine {
 					$is_api,
 					$match
 				);
+
+				if ( null !== $post_fields ) {
+					$payload['posts']['items'] = array_map(
+						static fn( $item ) => $this->project_post_fields( $item, $post_fields ),
+						$payload['posts']['items']
+					);
+				}
+
+				$payload['posts']['has_more'] = ( (int) $payload['posts']['page'] * (int) $payload['posts']['per_page'] ) < (int) $payload['posts']['total'];
+				$payload['posts']['cached']   = ! empty( $payload['posts']['cached'] );
 			}
 		}
 
@@ -723,8 +775,9 @@ final class WSS_Search_Engine {
 			] ) ) . '_'
 			. md5( implode( '|', $words ) );
 
-		$cached = $this->cache->get( $cache_key );
-		if ( ! is_array( $cached ) || ! isset( $cached['items'] ) || ! is_array( $cached['items'] ) ) {
+		$cache_hit = is_array( $cached ) && isset( $cached['items'] ) && is_array( $cached['items'] );
+
+		if ( ! $cache_hit ) {
 			$cached = $this->build_posts_list( $words, $patterns, $filters, $is_api, $match );
 			$this->cache->set( $cache_key, $cached, WSS_Config::POSTS_CACHE_TTL );
 		}
@@ -788,6 +841,7 @@ final class WSS_Search_Engine {
 			'page'        => $page,
 			'per_page'    => $per_page,
 			'total_pages' => $total_pages,
+			'cached'      => $cache_hit,
 		];
 	}
 
@@ -968,7 +1022,8 @@ final class WSS_Search_Engine {
 		$order = $filters['orderby'] === 'date_asc' ? 'ASC' : 'DESC';
 
 		$sql = "SELECT p.ID, p.post_title, p.post_content, p.post_excerpt,
-					p.post_status, p.post_date, p.post_author, p.post_type
+					p.post_status, p.post_date, p.post_date_gmt, p.post_name,
+					p.post_author, p.post_type
 			FROM {$wpdb->posts} AS p
 			WHERE " . $where['sql'] . "
 			ORDER BY p.post_date $order, p.ID $order
@@ -1231,6 +1286,10 @@ final class WSS_Search_Engine {
 			'status_label' => $this->get_status_label( (string) $row->post_status ),
 			'date'         => mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $row->post_date ),
 			'date_iso'     => $date_iso,
+			'date_gmt'     => ( ! empty( $row->post_date_gmt ) && '0000-00-00 00:00:00' !== $row->post_date_gmt )
+				? gmdate( 'c', (int) strtotime( $row->post_date_gmt . ' UTC' ) )
+				: '',
+			'slug'         => (string) ( $row->post_name ?? '' ),
 			'permalink'    => $permalink,
 			'url'          => $edit ? $edit : admin_url( 'post.php?post=' . (int) $row->ID . '&action=edit' ),
 			'excerpt'      => $this->make_excerpt( $searchable, $words ),
@@ -1905,6 +1964,115 @@ final class WSS_Search_Engine {
 	}
 
 	/**
+	 * Post fields of a /search response.
+	 *
+	 * `id` is always present. The whitelist is POST_FIELDS; link fields are
+	 * accepted too, so `fields` keeps working for scope=links/all, but a name
+	 * that is neither is a 400 with the allowed list — a silently dropped
+	 * field would look like "the field is empty".
+	 *
+	 * @param mixed $fields
+	 * @return string[]|null|WP_Error Null means "full item".
+	 */
+	private function parse_post_fields( $fields ) {
+		if ( null === $fields || '' === $fields || [] === $fields ) {
+			return null;
+		}
+
+		if ( is_string( $fields ) ) {
+			$fields = array_map( 'trim', explode( ',', $fields ) );
+		}
+
+		if ( ! is_array( $fields ) ) {
+			return new WP_Error(
+				'wss_invalid_fields',
+				__( 'Параметр fields должен быть списком через запятую или массивом.', 'wp-smart-search' ),
+				[ 'status' => 400 ]
+			);
+		}
+
+		$known   = array_merge( WSS_Config::POST_FIELDS, WSS_Config::LINK_FIELDS );
+		$out     = [];
+		$invalid = [];
+
+		foreach ( $fields as $field ) {
+			if ( ! is_string( $field ) || '' === $field ) {
+				continue;
+			}
+
+			if ( in_array( $field, $known, true ) ) {
+				$out[] = $field;
+			} else {
+				$invalid[] = $field;
+			}
+		}
+
+		if ( ! empty( $invalid ) ) {
+			return new WP_Error(
+				'wss_invalid_fields',
+				sprintf(
+					/* translators: 1: unknown fields, 2: allowed post fields */
+					__( 'Неизвестные поля: %1$s. Допустимые поля записи: %2$s.', 'wp-smart-search' ),
+					implode( ', ', $invalid ),
+					implode( ', ', WSS_Config::POST_FIELDS )
+				),
+				[ 'status' => 400 ]
+			);
+		}
+
+		if ( empty( $out ) ) {
+			return null;
+		}
+
+		return array_values( array_unique( array_merge( [ 'id' ], array_values( array_intersect( $out, WSS_Config::POST_FIELDS ) ) ) ) );
+	}
+
+	/**
+	 * One post item reduced to the requested fields.
+	 *
+	 * @param array    $item
+	 * @param string[] $fields Already validated, id first.
+	 */
+	private function project_post_fields( array $item, array $fields ): array {
+		$out = [];
+
+		foreach ( $fields as $field ) {
+			switch ( $field ) {
+				case 'id':
+					$out['id'] = (int) $item['id'];
+					break;
+				case 'date':
+					$out['date'] = (string) ( $item['date_iso'] ?? '' );
+					break;
+				case 'date_gmt':
+					$out['date_gmt'] = (string) ( $item['date_gmt'] ?? '' );
+					break;
+				case 'status':
+					$out['status'] = (string) $item['status'];
+					break;
+				case 'title':
+					$out['title'] = (string) $item['title'];
+					break;
+				case 'slug':
+					$out['slug'] = (string) ( $item['slug'] ?? '' );
+					break;
+				case 'url':
+					// The public permalink, not the admin edit link.
+					$out['url'] = (string) ( $item['permalink'] ?? '' );
+					break;
+				case 'author':
+					$out['author'] = (int) ( $item['author']['id'] ?? 0 );
+					break;
+				case 'type':
+					$out['type'] = (string) ( $item['post_type'] ?? 'post' );
+					break;
+			}
+		}
+
+		return $out;
+	}
+
+	/**
 	 * Parses the fields parameter.
 	 *
 	 * Returns null (all fields), a field list (required fields added)
@@ -1916,7 +2084,7 @@ final class WSS_Search_Engine {
 	 * @return string[]|null|WP_Error
 	 */
 	private function parse_fields( $fields ) {
-		if ( $fields === null || $fields === '' || $fields === [] ) {
+		if ( null === $fields || '' === $fields || [] === $fields ) {
 			return null;
 		}
 		if ( is_string( $fields ) ) {
