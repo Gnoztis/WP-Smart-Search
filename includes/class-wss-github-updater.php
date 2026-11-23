@@ -1,4 +1,11 @@
 <?php
+/**
+ * GitHub updater for WP Smart Search.
+ *
+ * GENERATED FILE — do not edit by hand.
+ * Source: tools/shared/updater/class-github-updater.php
+ * Regenerate: node tools/scripts/sync-updater.mjs wp-smart-search
+ */
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
