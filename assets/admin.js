@@ -683,12 +683,22 @@
 				.attr('aria-valuenow', percent)
 				.css('width', percent + '%');
 
-			$indexText.text(
-				WSS.i18n.indexProgress
-					.replace('%1$d', data.processed || 0)
-					.replace('%2$d', data.total || 0)
-					.replace('%3$d', percent)
-			);
+			if (data.refreshing) {
+				/* The index is complete; the pass only catches up with
+				   changes, so the denominator is the remaining work. */
+				$indexText.text(
+					WSS.i18n.indexRefreshing
+						.replace('%1$d', data.processed || 0)
+						.replace('%2$d', (data.processed || 0) + (data.refresh_pending || 0))
+				);
+			} else {
+				$indexText.text(
+					WSS.i18n.indexProgress
+						.replace('%1$d', data.processed || 0)
+						.replace('%2$d', data.total || 0)
+						.replace('%3$d', percent)
+				);
+			}
 
 			if ($indexCounts.length && typeof data.links === 'number') {
 				$indexCounts.text(
@@ -780,7 +790,7 @@
 			});
 		}
 
-		function indexStep(isFirst, isRestart) {
+		function indexStep(isFirst, mode) {
 			if (!indexActive) {
 				return;
 			}
@@ -793,7 +803,8 @@
 					action:  WSS.indexStepAction,
 					nonce:   WSS.indexStepNonce,
 					start:   isFirst ? 1 : 0,
-					restart: isRestart ? 1 : 0
+					restart: (isFirst && mode === 'rebuild') ? 1 : 0,
+					mode:    mode
 				}
 			}).done(function (res) {
 				if (!indexActive) {
@@ -819,7 +830,7 @@
 				}
 
 				indexTimer = setTimeout(function () {
-					indexStep(false, false);
+					indexStep(false, mode);
 				}, INDEX_PAUSE);
 			}).fail(function (jqXHR, textStatus) {
 				if (textStatus === 'abort' || !indexActive) {
@@ -833,7 +844,7 @@
 				if (indexRetries <= INDEX_MAX_RETRY) {
 					$indexText.text(WSS.i18n.indexRetry);
 					indexTimer = setTimeout(function () {
-						indexStep(false, false);
+						indexStep(false, mode);
 					}, INDEX_RETRY_DELAYS[indexRetries - 1]);
 					return;
 				}
@@ -846,7 +857,7 @@
 			});
 		}
 
-		function indexRun(isRestart) {
+		function indexRun(mode) {
 			if (indexActive) {
 				return;
 			}
@@ -857,11 +868,12 @@
 			$indexStop.removeAttr('hidden');
 			$indexText.text(WSS.i18n.indexRunning);
 			$indexBar.attr('aria-valuenow', 0).css('width', '0%');
-			indexStep(true, isRestart);
+			indexStep(true, mode);
 		}
 
 		$indexStart.on('click', function () {
-			indexRun(false);
+			// Catch up with changes; the index stays complete (refreshing).
+			indexRun('refresh');
 		});
 
 		$indexRestart.on('click', function () {
@@ -871,7 +883,8 @@
 			if (window.confirm && !window.confirm(WSS.i18n.indexRestart)) {
 				return;
 			}
-			indexRun(true);
+			// Full pass from zero: the format is stamped again.
+			indexRun('rebuild');
 		});
 
 		$indexStop.on('click', function () {

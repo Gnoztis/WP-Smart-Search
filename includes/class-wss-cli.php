@@ -173,6 +173,77 @@ final class WSS_Cli {
 	}
 
 	/**
+	 * Runs an incremental pass over a complete index.
+	 *
+	 * Only posts changed since the last pass (and rows still written in an
+	 * older format) are walked. index_version is preserved, so the index stays
+	 * trustworthy while the pass runs.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--batch-size=<int>]
+	 * : Posts per batch. Default 200.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp wss index refresh
+	 *     wp wss index refresh --batch-size=500
+	 *
+	 * @param array $args
+	 * @param array $assoc_args
+	 */
+	public function refresh( $args = [], $assoc_args = [] ): void {
+		$batch = (int) \WP_CLI\Utils\get_flag_value( $assoc_args, 'batch-size', 200 );
+
+		$before = WSS_Index_Backfill::report();
+
+		if ( $before['rebuild_required'] ) {
+			\WP_CLI::warning(
+				sprintf(
+					'Index state is "%s": an incremental pass keeps it untrustworthy. Run "wp wss index rebuild" first.',
+					$before['state']
+				)
+			);
+		}
+
+		WSS_Index_Backfill::refresh( false );
+
+		$ticker = function ( $processed, $errors, $cursor ) {
+			\WP_CLI::log( sprintf( 'checked: %d, errors: %d, cursor: %d', $processed, $errors, $cursor ) );
+		};
+
+		$started = microtime( true );
+		$result  = $this->backfill->rebuild_sync( $batch, $ticker, true, 'refresh' );
+		$report  = WSS_Index_Backfill::report();
+
+		\WP_CLI::log(
+			sprintf(
+				'Checked %d posts in %.1fs, errors: %d, links written: %d, state: %s.',
+				$result['processed'],
+				microtime( true ) - $started,
+				$result['errors'],
+				$report['links_written'],
+				$report['state']
+			)
+		);
+
+		if ( 0 === (int) $result['processed'] ) {
+			\WP_CLI::success( 'The index is up to date, nothing to refresh.' );
+			return;
+		}
+
+		if ( $result['errors'] > 0 ) {
+			\WP_CLI::error(
+				sprintf( 'Refresh finished with %d error(s); see the log above.', $result['errors'] ),
+				false
+			);
+			\WP_CLI::halt( 1 );
+		}
+
+		\WP_CLI::success( sprintf( 'Index refreshed, state: %s.', $report['state'] ) );
+	}
+
+	/**
 	 * Prints the schema state of the links index.
 	 *
 	 * ## EXAMPLES

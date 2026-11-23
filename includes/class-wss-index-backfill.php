@@ -154,6 +154,8 @@ final class WSS_Index_Backfill {
 			'batch'         => 0,
 			'missing'       => 0,
 			'links_written' => 0,
+			'mode'          => '',
+			'last_pass_at'  => 0,
 		];
 
 		$raw = self::option_row();
@@ -238,6 +240,44 @@ final class WSS_Index_Backfill {
 				'finished'      => 0,
 				'index_version' => '',
 				'links_written' => 0,
+				'mode'          => 'rebuild',
+				'last_pass_at'  => (int) ( $state['last_pass_at'] ?? 0 ),
+			] );
+		}
+
+		if ( $schedule && ! self::browser_active() && ! wp_next_scheduled( self::HOOK ) ) {
+			wp_schedule_single_event( time() + self::SCHEDULE_DELAY, self::HOOK );
+		}
+	}
+
+	/**
+	 * Starts an incremental pass over a complete index.
+	 *
+	 * This is what the "Доиндексировать" button means: catch up with posts
+	 * changed since the last pass and with rows still written in an older
+	 * format. It must not reset the job — index_version, last_pass_at and the
+	 * fact that the index is complete all survive, so the state stays
+	 * trustworthy ("refreshing") while the pass runs. Only start() resets.
+	 *
+	 * @param bool $schedule Queue a WP-Cron run (false for the browser step).
+	 */
+	public static function refresh( bool $schedule = true ): void {
+		$state = self::state();
+
+		// A running job keeps its cursor; a finished one becomes a new pass.
+		if ( ! empty( $state['done'] ) ) {
+			self::save_state( [
+				'done'          => false,
+				'cursor'        => 0,
+				'processed'     => 0,
+				'errors'        => 0,
+				'started'       => time(),
+				'finished'      => 0,
+				// Preserved on purpose: the index is still complete.
+				'index_version' => (string) ( $state['index_version'] ?? '' ),
+				'links_written' => 0,
+				'mode'          => 'refresh',
+				'last_pass_at'  => (int) ( $state['last_pass_at'] ?? 0 ),
 			] );
 		}
 
@@ -262,6 +302,10 @@ final class WSS_Index_Backfill {
 			'finished'      => 0,
 			'index_version' => '',
 			'links_written' => 0,
+			// "Пересобрать заново": a full pass, so the format is stamped
+			// again when it finishes.
+			'mode'          => 'rebuild',
+			'last_pass_at'  => 0,
 		] );
 	}
 
@@ -420,8 +464,11 @@ final class WSS_Index_Backfill {
 		$deadline = microtime( true ) + self::TIME_BUDGET;
 		$fetched  = 0;
 
+		$mode  = 'refresh' === ( $state['mode'] ?? '' ) ? 'refresh' : 'rebuild';
+		$since = (int) ( $state['last_pass_at'] ?? 0 );
+
 		try {
-			$ids     = $this->post_ids_after( (int) $state['cursor'], $batch );
+			$ids     = $this->post_ids_after( (int) $state['cursor'], $batch, $mode, $since );
 			$fetched = count( $ids );
 
 			foreach ( $ids as $post_id ) {
@@ -460,9 +507,15 @@ final class WSS_Index_Backfill {
 		}
 
 		if ( $fetched < $batch || $state['errors'] > self::MAX_ERRORS ) {
-			$state['done']          = true;
-			$state['finished']      = time();
-			$state['index_version'] = WSS_Config::LINKS_INDEX_VERSION;
+			$state['done']         = true;
+			$state['finished']     = time();
+			$state['last_pass_at'] = time();
+
+			// A refresh validates the existing index; only a full rebuild
+			// stamps the format it just produced.
+			if ( 'refresh' !== $mode ) {
+				$state['index_version'] = WSS_Config::LINKS_INDEX_VERSION;
+			}
 		}
 
 		// Flush the diagnostics snapshot only when the job is over: an
@@ -513,7 +566,10 @@ final class WSS_Index_Backfill {
 
 		$deadline = microtime( true ) + self::BROWSER_BUDGET;
 
-		$ids = $this->post_ids_after( $old_cursor, $limit );
+		$mode  = 'refresh' === ( $state['mode'] ?? '' ) ? 'refresh' : 'rebuild';
+		$since = (int) ( $state['last_pass_at'] ?? 0 );
+
+		$ids = $this->post_ids_after( $old_cursor, $limit, $mode, $since );
 
 		$processed     = 0;
 		$indexed       = 0;
@@ -577,12 +633,20 @@ final class WSS_Index_Backfill {
 			'batch'         => $next_batch,
 			'missing'       => (int) $state['missing'] + $missing,
 			'links_written' => (int) ( $state['links_written'] ?? 0 ) + $links_written,
+			'mode'          => $mode,
+			'last_pass_at'  => (int) ( $state['last_pass_at'] ?? 0 ),
 		];
 
 		if ( $finished ) {
-			$next['done']          = true;
-			$next['finished']      = time();
-			$next['index_version'] = WSS_Config::LINKS_INDEX_VERSION;
+			$next['done']         = true;
+			$next['finished']     = time();
+			$next['last_pass_at'] = time();
+
+			// A refresh validates the existing index; only a full rebuild
+			// stamps the format it just produced.
+			if ( 'refresh' !== $mode ) {
+				$next['index_version'] = WSS_Config::LINKS_INDEX_VERSION;
+			}
 		}
 
 		$won = $this->advance_cursor( $old_cursor, $next );
@@ -773,10 +837,12 @@ final class WSS_Index_Backfill {
 	 * @param int           $batch  Posts per batch.
 	 * @param callable|null $tick   Receives (processed, errors, cursor) after each batch.
 	 * @param bool          $resume Continue from the stored cursor instead of resetting.
+	 * @param string        $mode   'rebuild' (full pass) or 'refresh' (incremental).
 	 * @return array{processed:int,errors:int,missing:int,done:bool,cursor:int}
 	 */
-	public function rebuild_sync( int $batch = 200, ?callable $tick = null, bool $resume = false ): array {
+	public function rebuild_sync( int $batch = 200, ?callable $tick = null, bool $resume = false, string $mode = 'rebuild' ): array {
 		$batch = max( 1, $batch );
+		$mode  = 'refresh' === $mode ? 'refresh' : 'rebuild';
 
 		$state = self::state();
 
@@ -792,11 +858,14 @@ final class WSS_Index_Backfill {
 				'batch'         => 0,
 				'missing'       => 0,
 				'links_written' => 0,
+				'mode'          => $mode,
+				'last_pass_at'  => (int) ( $state['last_pass_at'] ?? 0 ),
 			];
 			self::save_state( $state );
 		} else {
 			$state['done']     = false;
 			$state['finished'] = 0;
+			$state['mode']     = $mode;
 			self::save_state( $state );
 		}
 
@@ -806,9 +875,10 @@ final class WSS_Index_Backfill {
 		$missing       = (int) ( $state['missing'] ?? 0 );
 		$links_written = (int) ( $state['links_written'] ?? 0 );
 		$started       = (int) ( $state['started'] ?? 0 ) ? (int) $state['started'] : time();
+		$since         = (int) ( $state['last_pass_at'] ?? 0 );
 
 		do {
-			$ids = $this->post_ids_after( $cursor, $batch );
+			$ids = $this->post_ids_after( $cursor, $batch, $mode, $since );
 
 			foreach ( $ids as $post_id ) {
 				try {
@@ -844,11 +914,17 @@ final class WSS_Index_Backfill {
 			'errors'        => $errors,
 			'started'       => $started,
 			'finished'      => time(),
-			'index_version' => WSS_Config::LINKS_INDEX_VERSION,
+			// A refresh keeps the version it validated; only a full rebuild
+			// stamps the format it produced.
+			'index_version' => 'refresh' === $mode
+				? (string) ( $state['index_version'] ?? '' )
+				: WSS_Config::LINKS_INDEX_VERSION,
 			'batch'         => 0,
 			'missing'       => $missing,
 			'links_written' => $links_written,
 			'last_cron'     => (int) ( $state['last_cron'] ?? 0 ),
+			'mode'          => $mode,
+			'last_pass_at'  => time(),
 		];
 
 		self::save_state( $final );
@@ -863,29 +939,89 @@ final class WSS_Index_Backfill {
 	}
 
 	/**
+	 * Mode-specific part of the post selection.
+	 *
+	 *  - rebuild — every post, because the index is being built from scratch;
+	 *  - refresh — only posts that need a new pass: modified after the last
+	 *    completed pass, or still carrying rows of an older index format
+	 *    (anchor_kind = 'unknown'). Everything else is already correct.
+	 *
+	 * @param string $mode  'rebuild' or 'refresh'.
+	 * @param int    $since Unix time of the last completed pass.
+	 * @return array{0:string,1:array<int,string>} SQL fragment and its params.
+	 */
+	private static function mode_condition( string $mode, int $since ): array {
+		if ( 'refresh' !== $mode ) {
+			return [ '', [] ];
+		}
+
+		$links = WSS_Links_Indexer::table();
+
+		return [
+			" AND ( p.post_modified_gmt > %s
+				OR EXISTS (
+					SELECT 1 FROM {$links} l
+					WHERE l.post_id = p.ID AND l.anchor_kind = 'unknown'
+				) )",
+			[ gmdate( 'Y-m-d H:i:s', max( 0, $since ) ) ],
+		];
+	}
+
+	/**
 	 * Next post IDs after the cursor, in insertion order.
 	 *
+	 * @param int    $cursor Cursor from the job state.
+	 * @param int    $limit  Batch size.
+	 * @param string $mode   'rebuild' or 'refresh'.
+	 * @param int    $since  Unix time of the last completed pass (refresh only).
 	 * @return int[]
 	 */
-	private function post_ids_after( int $cursor, int $limit ): array {
+	private function post_ids_after( int $cursor, int $limit, string $mode = 'rebuild', int $since = 0 ): array {
 		global $wpdb;
 
 		$statuses = WSS_Config::ALLOWED_STATUSES;
 		$ph       = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
 
-		$sql = "SELECT ID FROM {$wpdb->posts}
-			WHERE post_type = 'post'
-			  AND post_status IN ({$ph})
-			  AND ID > %d
-			ORDER BY ID ASC
+		[ $condition, $condition_params ] = self::mode_condition( $mode, $since );
+
+		$sql = "SELECT p.ID FROM {$wpdb->posts} p
+			WHERE p.post_type = 'post'
+			  AND p.post_status IN ({$ph})
+			  AND p.ID > %d{$condition}
+			ORDER BY p.ID ASC
 			LIMIT %d";
 
-		$params = array_merge( array_values( $statuses ), [ $cursor, $limit ] );
+		$params = array_merge( array_values( $statuses ), [ $cursor ], $condition_params, [ $limit ] );
 
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
 		$ids = $wpdb->get_col( $wpdb->prepare( $sql, $params ) );
 
 		return is_array( $ids ) ? array_map( 'intval', $ids ) : [];
+	}
+
+	/**
+	 * How many posts the current pass still has to walk.
+	 *
+	 * The admin shows "проверено N из M" for a refresh; M is this count plus
+	 * the posts already walked in the pass.
+	 */
+	private function count_remaining( int $cursor, string $mode, int $since ): int {
+		global $wpdb;
+
+		$statuses = WSS_Config::ALLOWED_STATUSES;
+		$ph       = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
+
+		[ $condition, $condition_params ] = self::mode_condition( $mode, $since );
+
+		$sql = "SELECT COUNT(*) FROM {$wpdb->posts} p
+			WHERE p.post_type = 'post'
+			  AND p.post_status IN ({$ph})
+			  AND p.ID > %d{$condition}";
+
+		$params = array_merge( array_values( $statuses ), [ $cursor ], $condition_params );
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.DirectDatabaseQuery
+		return (int) $wpdb->get_var( $wpdb->prepare( $sql, $params ) );
 	}
 
 	/* ============================================================
@@ -953,6 +1089,8 @@ final class WSS_Index_Backfill {
 		$schema_ok   = 'ok' === (string) ( $schema['state'] ?? 'missing' );
 		$schema_miss = 'missing' === (string) ( $schema['state'] ?? 'missing' );
 
+		$mode = 'refresh' === ( $state['mode'] ?? '' ) ? 'refresh' : ( 'rebuild' === ( $state['mode'] ?? '' ) ? 'rebuild' : '' );
+
 		if ( $schema_miss ) {
 			// Nothing is stored at all: no rows to contradict the "empty".
 			$health = 'empty';
@@ -962,11 +1100,32 @@ final class WSS_Index_Backfill {
 		} elseif ( $links_total === 0 && $posts_processed === 0 ) {
 			$health = 'empty';
 		} elseif ( ! $done ) {
-			$health = 'partial';
+			if ( 'refresh' === $mode && $index_version === WSS_Config::LINKS_INDEX_VERSION ) {
+				// The index is complete; the pass only catches up with changes.
+				$health = 'refreshing';
+			} elseif ( 'rebuild' === $mode ) {
+				$health = 'rebuilding';
+			} else {
+				// A refresh over an incomplete index, or a legacy unfinished
+				// state from before this contract: not trustworthy.
+				$health = 'partial';
+			}
 		} elseif ( $index_version !== WSS_Config::LINKS_INDEX_VERSION ) {
 			$health = 'stale';
 		} else {
 			$health = 'ready';
+		}
+
+		$refreshing      = 'refreshing' === $health;
+		$rebuild_required = ! in_array( $health, [ 'ready', 'refreshing' ], true ) || ! $schema_ok;
+
+		// During a refresh the denominator is the work left in this pass, not
+		// every post on the site: "проверено N из M" must not look like a
+		// rebuild of everything.
+		$refresh_pending = 0;
+		if ( $refreshing ) {
+			$since           = (int) ( $state['last_pass_at'] ?? 0 ) ?: (int) ( $state['finished'] ?? 0 );
+			$refresh_pending = $this->count_remaining( $cursor, 'refresh', $since );
 		}
 
 		$percent = $posts_total > 0
@@ -980,6 +1139,11 @@ final class WSS_Index_Backfill {
 
 		return [
 			'state'               => $health,
+			'refreshing'          => $refreshing,
+			'rebuild_required'    => $rebuild_required,
+			'mode'                => $mode,
+			'last_pass_at'        => (int) ( $state['last_pass_at'] ?? 0 ),
+			'refresh_pending'     => $refresh_pending,
 			'percent'             => $percent,
 			'posts_total'         => $posts_total,
 			'posts_processed'     => $posts_processed,
@@ -990,7 +1154,8 @@ final class WSS_Index_Backfill {
 			'links_per_post'      => $links_per_post,
 			'generation'          => $generation,
 			'index_version'       => $index_version,
-			'needs_rebuild'       => 'ready' !== $health || ! $schema_ok,
+			// Legacy alias kept for clients written against 2.6.x.
+			'needs_rebuild'       => $rebuild_required,
 			'schema'              => $schema,
 			'table'               => (bool) $snap['table'],
 			'done'                => $done,

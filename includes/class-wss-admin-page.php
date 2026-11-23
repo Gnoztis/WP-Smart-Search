@@ -165,10 +165,11 @@ final class WSS_Admin_Page {
 					'pageLabel'     => __( 'Страница %d', 'wp-smart-search' ),
 					'emptyState'    => __( 'Введите запрос для поиска по записям и тегам', 'wp-smart-search' ),
 					'indexRunning'   => __( 'Переиндексация…', 'wp-smart-search' ),
+					'indexRefreshing' => __( 'Индекс готов. Идёт плановое обновление: проверено %1$d из %2$d.', 'wp-smart-search' ),
 					'indexProgress'  => __( 'Обработано %1$d из %2$d (%3$d%)', 'wp-smart-search' ),
 					'indexDone'      => __( 'Готово.', 'wp-smart-search' ),
 					'indexStopped'   => __( 'Остановлено. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
-					'indexRestart'   => __( 'Начать пересборку с нуля? Текущий прогресс будет потерян.', 'wp-smart-search' ),
+					'indexRestart'   => __( 'Пересобрать индекс заново? Это полный проход по всем записям, текущий прогресс будет потерян.', 'wp-smart-search' ),
 					'indexRetry'     => __( 'Нет ответа от сервера, повторяем…', 'wp-smart-search' ),
 					'indexError'     => __( 'Ошибка запроса. Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
 					'indexErrorStatus' => __( 'Ошибка запроса (HTTP %s). Прогресс сохранён — можно продолжить.', 'wp-smart-search' ),
@@ -462,14 +463,29 @@ final class WSS_Admin_Page {
 				<div class="wss-panel-card">
 					<h2 class="wss-panel-title"><?php esc_html_e( 'Индекс ссылок', 'wp-smart-search' ); ?></h2>
 
-					<?php if ( 'ready' !== $index_status['state'] ) : ?>
+					<?php if ( 'refreshing' === $index_status['state'] ) : ?>
+						<div class="wss-index-note" role="status">
+							<?php
+							echo esc_html(
+								sprintf(
+									/* translators: 1: checked posts, 2: posts in this pass */
+									__( 'Индекс готов. Идёт плановое обновление: проверено %1$d из %2$d записей. Аудит ссылок можно продолжать.', 'wp-smart-search' ),
+									(int) $index_status['processed'],
+									(int) $index_status['processed'] + (int) $index_status['refresh_pending']
+								)
+							);
+							?>
+						</div>
+					<?php elseif ( in_array( $index_status['state'], [ 'rebuilding', 'partial', 'stale', 'empty' ], true ) ) : ?>
 						<div class="wss-index-alert<?php echo esc_attr( 'empty' === $index_status['state'] ? ' wss-index-alert-critical' : '' ); ?>" role="alert">
 							<p class="wss-index-alert-title">
 								<?php
 								echo esc_html(
 									'empty' === $index_status['state']
 										? __( 'Индекс пуст: поиск по ссылкам ничего не найдёт.', 'wp-smart-search' )
-										: __( 'Пересборка не завершена: поиск по ссылкам даёт неполную картину.', 'wp-smart-search' )
+										: ( 'stale' === $index_status['state']
+											? __( 'Индекс собран старой версией формата: нужна пересборка.', 'wp-smart-search' )
+											: __( 'Пересборка не завершена: поиск по ссылкам даёт неполную картину.', 'wp-smart-search' ) )
 								);
 								?>
 							</p>
@@ -645,8 +661,8 @@ final class WSS_Admin_Page {
 							</form>
 
 							<div class="wss-index-runner" id="wss-index-runner" hidden>
-								<button type="button" id="wss-index-start" class="wss-reset-btn"><?php esc_html_e( 'Доиндексировать из браузера', 'wp-smart-search' ); ?></button>
-								<button type="button" id="wss-index-restart" class="wss-reset-btn"><?php esc_html_e( 'Начать заново', 'wp-smart-search' ); ?></button>
+								<button type="button" id="wss-index-start" class="wss-reset-btn"><?php esc_html_e( 'Доиндексировать', 'wp-smart-search' ); ?></button>
+								<button type="button" id="wss-index-restart" class="wss-reset-btn"><?php esc_html_e( 'Пересобрать заново', 'wp-smart-search' ); ?></button>
 								<button type="button" id="wss-index-stop" class="wss-reset-btn" hidden><?php esc_html_e( 'Остановить', 'wp-smart-search' ); ?></button>
 
 								<div class="wss-index-track">
@@ -1266,8 +1282,13 @@ final class WSS_Admin_Page {
 	 */
 	private function index_field_docs(): array {
 		return [
-			[ 'state', 'ready | empty | partial | stale', __( 'empty — записи есть, а индекс пуст и пересборка не дала строк; partial — пересборка не завершена; stale — индекс собран старой версией формата (например, до anchor_kind); ready — пересборка завершена и формат совпадает. ready не зависит от COUNT по таблице ссылок.', 'wp-smart-search' ) ],
-			[ 'needs_rebuild', 'boolean', __( 'То же, что state != ready: сначала переиндексация, потом аудит.', 'wp-smart-search' ) ],
+			[ 'state', 'ready | refreshing | rebuilding | partial | stale | empty', __( 'ready — индекс полный, прохода нет; refreshing — индекс полный, идёт инкрементальный проход (аудиту можно доверять); rebuilding — идёт полная пересборка; partial — пересборка брошена или не завершена; stale — версия формата не совпадает; empty — индекса нет. ready и refreshing не зависят от COUNT по таблице ссылок.', 'wp-smart-search' ) ],
+			[ 'refreshing', 'boolean', __( 'Идёт инкрементальный проход по полному индексу: данные полные, обновляются только изменённые записи.', 'wp-smart-search' ) ],
+			[ 'rebuild_required', 'boolean', __( 'Индексу нельзя доверять: state не ready/refreshing или схема не ok. Сначала пересборка, потом аудит.', 'wp-smart-search' ) ],
+			[ 'needs_rebuild', 'boolean', __( 'Устаревший синоним rebuild_required (оставлен для клиентов 2.6.x).', 'wp-smart-search' ) ],
+			[ 'mode', 'refresh | rebuild', __( 'Что сейчас выполняется: инкрементальный проход или полная пересборка.', 'wp-smart-search' ) ],
+			[ 'last_pass_at', 'integer', __( 'Когда завершился последний проход; от этой точки считается «что изменилось» для «Доиндексировать».', 'wp-smart-search' ) ],
+			[ 'refresh_pending', 'integer', __( 'Сколько записей осталось проверить в текущем инкрементальном проходе.', 'wp-smart-search' ) ],
 			[ 'percent', 'integer', __( 'Процент пройденных записей: posts_processed / posts_total. Достигает 100 после завершения, даже если у части записей нет ссылок.', 'wp-smart-search' ) ],
 			[ 'posts_total', 'integer', __( 'Сколько записей подлежит индексации.', 'wp-smart-search' ) ],
 			[ 'posts_processed', 'integer', __( 'Сколько записей пройдено: записи с ID <= cursor.', 'wp-smart-search' ) ],

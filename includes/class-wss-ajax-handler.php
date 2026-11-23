@@ -53,12 +53,21 @@ final class WSS_Ajax_Handler {
 
 		$start   = isset( $_POST['start'] ) ? absint( wp_unslash( $_POST['start'] ) ) : 0;
 		$restart = isset( $_POST['restart'] ) ? absint( wp_unslash( $_POST['restart'] ) ) : 0;
+		$mode    = isset( $_POST['mode'] ) ? sanitize_key( wp_unslash( $_POST['mode'] ) ) : 'rebuild';
+		$mode    = 'refresh' === $mode ? 'refresh' : 'rebuild';
 
 		if ( $restart > 0 ) {
+			// "Пересобрать заново": the cursor and the format are dropped.
 			WSS_Index_Backfill::reset();
 		} elseif ( $start > 0 ) {
-			// A finished job is reset, a running one keeps its cursor.
-			WSS_Index_Backfill::start( false );
+			if ( 'refresh' === $mode ) {
+				// "Доиндексировать": an incremental pass that keeps the index
+				// complete. A running job is continued, not restarted.
+				WSS_Index_Backfill::refresh( false );
+			} else {
+				// A finished job is reset, a running one keeps its cursor.
+				WSS_Index_Backfill::start( false );
+			}
 		}
 
 		// Refresh the marker: cron keeps its hands off while the tab is open.
@@ -70,9 +79,20 @@ final class WSS_Ajax_Handler {
 		$total     = (int) $report['posts_total'];
 		$processed = (int) $report['posts_processed'];
 		$done      = (bool) $result['done'];
+		$message   = '';
+
+		if ( $done ) {
+			$message = ( 'refresh' === $report['mode'] && 0 === (int) $report['processed'] )
+				? __( 'Индекс актуален, обновлять нечего.', 'wp-smart-search' )
+				: __( 'Готово.', 'wp-smart-search' );
+		}
 
 		wp_send_json_success( [
 			'done'          => $done,
+			'mode'          => (string) $report['mode'],
+			'refreshing'    => (bool) $report['refreshing'],
+			'rebuild_required' => (bool) $report['rebuild_required'],
+			'refresh_pending'  => (int) $report['refresh_pending'],
 			'processed'     => $processed,
 			'batch'         => (int) $result['processed'],
 			'batch_size'    => (int) $result['batch'],
@@ -89,7 +109,7 @@ final class WSS_Ajax_Handler {
 			'links'         => (int) $report['links_total'],
 			'state'         => (string) $report['state'],
 			'skipped'       => (bool) $result['skipped'],
-			'message'       => $done ? __( 'Готово.', 'wp-smart-search' ) : '',
+			'message'       => $message,
 		] );
 	}
 
