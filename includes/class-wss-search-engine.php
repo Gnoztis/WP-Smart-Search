@@ -778,6 +778,7 @@ final class WSS_Search_Engine {
 			] ) ) . '_'
 			. md5( implode( '|', $words ) );
 
+		$cached    = $this->cache->get( $cache_key );
 		$cache_hit = is_array( $cached ) && isset( $cached['items'] ) && is_array( $cached['items'] );
 
 		if ( ! $cache_hit ) {
