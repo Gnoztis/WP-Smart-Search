@@ -859,19 +859,22 @@ final class WSS_Rest_Controller {
 	/**
 	 * Runs a search through the cache.
 	 *
-	 * A hit answers without touching the database at all. On a database failure
-	 * the same request answers from an expired entry when one exists, and, when
-	 * no entry exists, waits up to WSS_CACHE_WAIT seconds for the database to
-	 * answer again before giving up: a short outage should delay a request,
-	 * not fail it.
+	 * A hit answers without touching the database. The cache is Redis and only
+	 * Redis: without it there is nothing to read from and nothing to wait for,
+	 * so the request goes straight to the engine.
+	 *
+	 * On a database failure the request is retried once a second for up to
+	 * twenty seconds (wss_cache_wait) — but only while Redis is available,
+	 * because the queue of retries lives there too.
 	 *
 	 * @param array<string,mixed> $input Engine input.
 	 * @return array|WP_Error
 	 */
 	private function cached_search( array $input ) {
-		$key = 'search:' . md5( (string) wp_json_encode( $this->sorted( $input ) ) );
+		$redis = WSS_Cache::is_available();
+		$key   = 'search:' . md5( (string) wp_json_encode( $this->sorted( $input ) ) );
 
-		if ( WSS_Cache::is_available() ) {
+		if ( $redis ) {
 			$hit = $this->cache->get( $key );
 
 			if ( is_array( $hit ) ) {
@@ -882,25 +885,18 @@ final class WSS_Rest_Controller {
 		$result = $this->run_search( $input );
 
 		if ( ! is_wp_error( $result ) ) {
-			if ( WSS_Cache::is_available() ) {
+			if ( $redis ) {
 				$this->cache->set( $key, $result, (int) apply_filters( 'wss_cache_ttl', 300 ) );
 			}
 
 			return $result;
 		}
 
-		// The engine failed: the usual reason is an unreachable database.
-		if ( WSS_Cache::is_available() ) {
-			$stale = $this->cache->get( $key, true );
-
-			if ( is_array( $stale ) ) {
-				return $stale;
-			}
+		if ( ! $redis ) {
+			return $result;
 		}
 
-		$wait = (int) apply_filters( 'wss_cache_wait', 20 );
-		$wait = max( 0, min( 30, $wait ) );
-
+		$wait     = max( 0, min( 30, (int) apply_filters( 'wss_cache_wait', 20 ) ) );
 		$deadline = microtime( true ) + $wait;
 
 		while ( $wait > 0 && microtime( true ) < $deadline ) {
@@ -909,9 +905,7 @@ final class WSS_Rest_Controller {
 			$retry = $this->run_search( $input );
 
 			if ( ! is_wp_error( $retry ) ) {
-				if ( WSS_Cache::is_available() ) {
-					$this->cache->set( $key, $retry, (int) apply_filters( 'wss_cache_ttl', 300 ) );
-				}
+				$this->cache->set( $key, $retry, (int) apply_filters( 'wss_cache_ttl', 300 ) );
 
 				return $retry;
 			}

@@ -20,6 +20,8 @@ final class WSS_Index_Queue {
 	public const OPTION = 'wss_index_queue';
 	public const HOOK   = 'wss_index_queue_worker';
 	public const LOCK   = 'wss_index_queue_lock';
+	public const REDIS_KEY = 'index-queue';
+	public const REDIS_TTL = 604800;
 
 	/** Ids kept in the queue; the oldest are dropped and counted. */
 	public const CAP = 500;
@@ -258,7 +260,20 @@ final class WSS_Index_Queue {
 	 * @return array{index:int[],remove:int[],last_run:int,errors:int,dropped:int,skipped_at:int}
 	 */
 	private static function read(): array {
-		$raw = get_option( self::OPTION, [] );
+		// Redis holds the queue when it is available: the API already depends on
+		// it, and a Redis restart with an empty queue is cheaper than an options
+		// row growing on every save.
+		$stored = null;
+
+		if ( WSS_Cache::is_available() ) {
+			$cached = ( new WSS_Cache() )->get( self::REDIS_KEY );
+
+			if ( is_array( $cached ) ) {
+				$stored = $cached;
+			}
+		}
+
+		$raw = null !== $stored ? $stored : get_option( self::OPTION, [] );
 
 		if ( ! is_array( $raw ) ) {
 			$raw = [];
@@ -273,10 +288,12 @@ final class WSS_Index_Queue {
 			'skipped_at' => (int) ( $raw['skipped_at'] ?? 0 ),
 		];
 	}
-
 	private static function write( array $queue ): void {
-		// Autoload off: the queue is read by cron and diagnostics, not by
-		// every front-end request.
+		if ( WSS_Cache::is_available() ) {
+			( new WSS_Cache() )->set( self::REDIS_KEY, $queue, self::REDIS_TTL );
+		}
+
+		// The option stays as the fallback: without Redis the queue must still
+		// exist or work is lost.
 		update_option( self::OPTION, $queue, false );
-	}
-}
+	}}
