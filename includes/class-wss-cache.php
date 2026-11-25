@@ -69,6 +69,14 @@ final class WSS_Cache {
 			return self::$backend;
 		}
 
+		// A file cache keeps the API answering when Redis is absent: the owner
+		// asked for the API to work through a cache, not for a cache that needs
+		// an extension he may not have.
+		if ( self::file_dir() ) {
+			self::$backend = 'file';
+			return self::$backend;
+		}
+
 		self::$backend = 'none';
 		return self::$backend;
 	}
@@ -252,7 +260,13 @@ final class WSS_Cache {
 	 * Cached array or null on miss. Never throws: a cache failure must not
 	 * break the search request.
 	 */
-	public function get( string $key ): ?array {
+	public function get( string $key, bool $allow_stale = false ): ?array {
+		if ( 'file' === self::backend() ) {
+			$value = self::file_get( $key, $allow_stale );
+
+			return is_array( $value ) ? $value : null;
+		}
+
 		if ( 'redis' !== self::backend() ) {
 			return null;
 		}
@@ -281,6 +295,10 @@ final class WSS_Cache {
 	 */
 	public function set( string $key, array $value, int $ttl ): bool {
 		$ttl = max( 1, $ttl );
+
+		if ( 'file' === self::backend() ) {
+			return self::file_set( $key, $value, $ttl );
+		}
 
 		if ( 'redis' !== self::backend() ) {
 			return false;
@@ -342,5 +360,118 @@ final class WSS_Cache {
 		set_transient( $transient, $count, $ttl );
 
 		return [ 'count' => $count, 'ttl' => $ttl ];
+	}
+
+	/* ============================================================
+	 *  File backend
+	 * ============================================================ */
+
+	/**
+	 * Directory of the file cache, created on demand.
+	 *
+	 * @return string Empty string when the directory cannot be used.
+	 */
+	private static function file_dir(): string {
+		static $dir = null;
+
+		if ( null !== $dir ) {
+			return $dir;
+		}
+
+		$uploads = function_exists( 'wp_upload_dir' ) ? wp_upload_dir( null, false ) : array();
+		$base    = is_array( $uploads ) && empty( $uploads['error'] ) ? (string) ( $uploads['basedir'] ?? '' ) : '';
+
+		if ( '' === $base ) {
+			$dir = '';
+			return $dir;
+		}
+
+		$path = trailingslashit( $base ) . 'wss-cache';
+
+		if ( ! is_dir( $path ) && ! wp_mkdir_p( $path ) ) {
+			$dir = '';
+			return $dir;
+		}
+
+		$dir = is_writable( $path ) ? trailingslashit( $path ) : '';
+
+		return $dir;
+	}
+
+	/**
+	 * Path of one cache file.
+	 *
+	 * @param string $key Cache key.
+	 */
+	private static function file_path( string $key ): string {
+		$dir = self::file_dir();
+
+		if ( '' === $dir ) {
+			return '';
+		}
+
+		return $dir . 'g' . ( new self() )->generation() . '-' . md5( $key ) . '.json';
+	}
+
+	/**
+	 * Reads a file entry. Expired entries are returned only when $allow_stale.
+	 *
+	 * @param string $key         Cache key.
+	 * @param bool   $allow_stale Return an expired entry too.
+	 * @return mixed Null when there is nothing to return.
+	 */
+	public static function file_get( string $key, bool $allow_stale = false ) {
+		$path = self::file_path( $key );
+
+		if ( '' === $path || ! is_file( $path ) ) {
+			return null;
+		}
+
+		$raw = file_get_contents( $path );
+
+		if ( false === $raw || '' === $raw ) {
+			return null;
+		}
+
+		$entry = json_decode( $raw, true );
+
+		if ( ! is_array( $entry ) || ! array_key_exists( 'v', $entry ) ) {
+			return null;
+		}
+
+		if ( ! $allow_stale && (int) ( $entry['exp'] ?? 0 ) < time() ) {
+			return null;
+		}
+
+		return $entry['v'];
+	}
+
+	/**
+	 * Writes a file entry atomically.
+	 *
+	 * @param string $key   Cache key.
+	 * @param mixed  $value Value.
+	 * @param int    $ttl   Seconds.
+	 */
+	public static function file_set( string $key, $value, int $ttl ): bool {
+		$path = self::file_path( $key );
+
+		if ( '' === $path ) {
+			return false;
+		}
+
+		$payload = wp_json_encode( array( 'exp' => time() + max( 1, $ttl ), 'v' => $value ) );
+
+		if ( ! is_string( $payload ) ) {
+			return false;
+		}
+
+		$tmp = $path . '.' . getmypid() . '.tmp';
+
+		if ( false === file_put_contents( $tmp, $payload ) ) {
+			return false;
+		}
+
+		return rename( $tmp, $path );
 	}
 }

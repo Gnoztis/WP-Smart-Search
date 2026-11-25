@@ -9,12 +9,14 @@ final class WSS_Rest_Controller {
 	private WSS_Rate_Limiter  $rate_limiter;
 	private WSS_Index_Backfill $backfill;
 	private WSS_Tags $tags;
+	private WSS_Cache $cache;
 
 	public function __construct( WSS_Search_Engine $engine, WSS_Rate_Limiter $rate_limiter, ?WSS_Index_Backfill $backfill = null, ?WSS_Tags $tags = null ) {
 		$this->engine       = $engine;
 		$this->rate_limiter = $rate_limiter;
 		$this->backfill     = $backfill ?? new WSS_Index_Backfill();
 		$this->tags         = $tags ?? new WSS_Tags( new WSS_Cache() );
+		$this->cache        = new WSS_Cache();
 	}
 
 	public function register_hooks(): void {
@@ -845,12 +847,109 @@ final class WSS_Rest_Controller {
 			$input['per_page'] = WSS_Config::POSTS_PER_PAGE_MAX;
 		}
 
-		$result = $this->engine->do_search( $input, true );
+		$result = $this->cached_search( $input );
+
 		if ( is_wp_error( $result ) ) {
 			return $this->as_rest_error( $result );
 		}
 
 		return new WP_REST_Response( $result, 200 );
+	}
+
+	/**
+	 * Runs a search through the cache.
+	 *
+	 * A hit answers without touching the database at all. On a database failure
+	 * the same request answers from an expired entry when one exists, and, when
+	 * no entry exists, waits up to WSS_CACHE_WAIT seconds for the database to
+	 * answer again before giving up: a short outage should delay a request,
+	 * not fail it.
+	 *
+	 * @param array<string,mixed> $input Engine input.
+	 * @return array|WP_Error
+	 */
+	private function cached_search( array $input ) {
+		$key = 'search:' . md5( (string) wp_json_encode( $this->sorted( $input ) ) );
+
+		if ( WSS_Cache::is_available() ) {
+			$hit = $this->cache->get( $key );
+
+			if ( is_array( $hit ) ) {
+				return $hit;
+			}
+		}
+
+		$result = $this->run_search( $input );
+
+		if ( ! is_wp_error( $result ) ) {
+			if ( WSS_Cache::is_available() ) {
+				$this->cache->set( $key, $result, (int) apply_filters( 'wss_cache_ttl', 300 ) );
+			}
+
+			return $result;
+		}
+
+		// The engine failed: the usual reason is an unreachable database.
+		if ( WSS_Cache::is_available() ) {
+			$stale = $this->cache->get( $key, true );
+
+			if ( is_array( $stale ) ) {
+				return $stale;
+			}
+		}
+
+		$wait = (int) apply_filters( 'wss_cache_wait', 20 );
+		$wait = max( 0, min( 30, $wait ) );
+
+		$deadline = microtime( true ) + $wait;
+
+		while ( $wait > 0 && microtime( true ) < $deadline ) {
+			sleep( 1 );
+
+			$retry = $this->run_search( $input );
+
+			if ( ! is_wp_error( $retry ) ) {
+				if ( WSS_Cache::is_available() ) {
+					$this->cache->set( $key, $retry, (int) apply_filters( 'wss_cache_ttl', 300 ) );
+				}
+
+				return $retry;
+			}
+		}
+
+		return $result;
+	}
+
+	/**
+	 * One attempt at the engine, with a database error turned into WP_Error.
+	 *
+	 * @param array<string,mixed> $input Engine input.
+	 * @return array|WP_Error
+	 */
+	private function run_search( array $input ) {
+		try {
+			return $this->engine->do_search( $input, true );
+		} catch ( Throwable $e ) {
+			return new WP_Error( 'wss_db_unavailable', __( 'База данных недоступна, попробуйте позже.', 'wp-smart-search' ), array( 'status' => 503 ) );
+		}
+	}
+
+	/**
+	 * Recursively sorted copy, so equal inputs produce one cache key.
+	 *
+	 * @param array<string,mixed> $input Engine input.
+	 * @return array<string,mixed>
+	 */
+	private function sorted( array $input ): array {
+		ksort( $input );
+
+		foreach ( $input as $key => $value ) {
+			if ( is_array( $value ) ) {
+				$input[ $key ] = $this->sorted( $value );
+			}
+		}
+
+		return $input;
 	}
 
 	/**
