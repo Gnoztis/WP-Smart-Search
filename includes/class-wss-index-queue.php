@@ -21,7 +21,6 @@ final class WSS_Index_Queue {
 	public const HOOK   = 'wss_index_queue_worker';
 	public const LOCK   = 'wss_index_queue_lock';
 	public const REDIS_KEY = 'index-queue';
-	public const REDIS_TTL = 604800;
 
 	/** Ids kept in the queue; the oldest are dropped and counted. */
 	public const CAP = 500;
@@ -290,7 +289,7 @@ final class WSS_Index_Queue {
 	}
 	private static function write( array $queue ): void {
 		if ( WSS_Cache::is_available() ) {
-			( new WSS_Cache() )->set( self::REDIS_KEY, $queue, self::REDIS_TTL );
+			( new WSS_Cache() )->set( self::REDIS_KEY, $queue, WSS_Config::queue_ttl() );
 		}
 
 		// The option stays as the fallback: without Redis the queue must still

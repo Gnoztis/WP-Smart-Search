@@ -25,6 +25,19 @@ final class WSS_Config {
 
 	public const CAPABILITY = 'publish_posts';
 
+	/** Default lifetime of a cached search response, seconds. */
+	public const CACHE_TTL_DEFAULT = 300;
+
+	/** Default wait for an unreachable database, seconds. */
+	public const CACHE_WAIT_DEFAULT = 20;
+
+	/** Upper bound for the wait, whatever a filter asks for. */
+	public const CACHE_WAIT_MAX = 30;
+
+	/** Default lifetime of a queue entry in Redis, seconds. */
+	public const QUEUE_TTL_DEFAULT = 604800;
+
+
 	public const MAX_WORDS          = 5;
 	public const MIN_LEN            = 2;
 	public const MAX_QUERY_LEN      = 200;
@@ -355,5 +368,41 @@ final class WSS_Config {
 		}
 
 		error_log( $line ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- A09 security event, no secrets.
+	}
+
+	/**
+	 * Cache lifetime in seconds.
+	 *
+	 * The default is in the code; a site can change it with the
+	 * WSS_CACHE_TTL constant in wp-config.php or the wss_cache_ttl filter.
+	 */
+	public static function cache_ttl(): int {
+		$ttl = defined( 'WSS_CACHE_TTL' ) ? (int) WSS_CACHE_TTL : self::CACHE_TTL_DEFAULT;
+		$ttl = (int) apply_filters( 'wss_cache_ttl', $ttl );
+
+		return max( 1, $ttl );
+	}
+
+	/**
+	 * How long a request waits for an unreachable database, in seconds.
+	 *
+	 * Default 20, override with WSS_CACHE_WAIT or the wss_cache_wait filter;
+	 * 0 turns the wait off.
+	 */
+	public static function cache_wait(): int {
+		$wait = defined( 'WSS_CACHE_WAIT' ) ? (int) WSS_CACHE_WAIT : self::CACHE_WAIT_DEFAULT;
+		$wait = (int) apply_filters( 'wss_cache_wait', $wait );
+
+		return max( 0, min( self::CACHE_WAIT_MAX, $wait ) );
+	}
+
+	/**
+	 * Queue lifetime in Redis, seconds.
+	 */
+	public static function queue_ttl(): int {
+		$ttl = defined( 'WSS_QUEUE_TTL' ) ? (int) WSS_QUEUE_TTL : self::QUEUE_TTL_DEFAULT;
+		$ttl = (int) apply_filters( 'wss_queue_ttl', $ttl );
+
+		return max( 60, $ttl );
 	}
 }

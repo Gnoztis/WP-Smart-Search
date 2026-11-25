@@ -886,7 +886,7 @@ final class WSS_Rest_Controller {
 
 		if ( ! is_wp_error( $result ) ) {
 			if ( $redis ) {
-				$this->cache->set( $key, $result, (int) apply_filters( 'wss_cache_ttl', 300 ) );
+				$this->cache->set( $key, $result, WSS_Config::cache_ttl() );
 			}
 
 			return $result;
@@ -896,7 +896,7 @@ final class WSS_Rest_Controller {
 			return $result;
 		}
 
-		$wait     = max( 0, min( 30, (int) apply_filters( 'wss_cache_wait', 20 ) ) );
+		$wait     = WSS_Config::cache_wait();
 		$deadline = microtime( true ) + $wait;
 
 		while ( $wait > 0 && microtime( true ) < $deadline ) {
@@ -905,7 +905,7 @@ final class WSS_Rest_Controller {
 			$retry = $this->run_search( $input );
 
 			if ( ! is_wp_error( $retry ) ) {
-				$this->cache->set( $key, $retry, (int) apply_filters( 'wss_cache_ttl', 300 ) );
+				$this->cache->set( $key, $retry, WSS_Config::cache_ttl() );
 
 				return $retry;
 			}
